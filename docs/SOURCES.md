@@ -365,3 +365,66 @@ from a wallet the operator controls, not from a build script.
 Change exactly two vars in `wrangler.jsonc`: `NETWORK` to `eip155:8453` and
 `PAY_TO` to a mainnet address. The mainnet USDC contract is already mapped in
 `src/discovery.ts` (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`). No code change.
+
+---
+
+## Task 4 findings, verified 2026-09-10
+
+### A live paywall bypass on /mcp
+
+`paymentMiddleware` gates **only the paths present in its `RoutesConfig`**.
+Anything else falls through to `next()` silently — there is no warning and no
+error.
+
+`src/index.ts` inspects the JSON-RPC method and delegates to the payment
+middleware for `tools/call` on the paid tool, which looked sufficient. It was
+not: `"POST /mcp"` was absent from the route config, so the middleware matched
+nothing and called through. Verified as a live **HTTP 200 returning real
+screening data, unpaid**, over JSON-RPC:
+
+```
+POST /mcp {"method":"tools/call","params":{"name":"exclusion_check",...}}
+-> 200 {"result":{"content":[{"text":"verdict: excluded (confidence match)..."}]}}
+```
+
+Fix: register `"POST /mcp"` in `routesFor()`. Because `index.ts` only delegates
+for the paid tool, registering the path does not put `initialize` or
+`tools/list` behind the paywall. Re-verified: 402 with a valid challenge, no data
+in the body, and all free methods still 200.
+
+**Lesson: a path-based paywall fails open.** Every paid path must be asserted
+against directly, not inferred from the presence of gating code.
+
+### MCP without Durable Objects
+
+`McpAgent` from the `agents` package keeps session state in a Durable Object.
+Every MCP method needed here — `initialize`, `ping`, `tools/list`, `tools/call` —
+is a pure request/response exchange, so `src/mcp.ts` implements the JSON-RPC
+methods statelessly and the service stays on the free tier. Notifications return
+202 with an empty body, as JSON-RPC requires.
+
+Discovery is deliberately free. Charging for `initialize`/`tools/list` would
+make the tool undiscoverable, since an agent cannot learn the price without
+reading them.
+
+### Rate limiting: the bucket trap
+
+Native `ratelimit` bindings are used rather than counting rows in D1: counting
+would cost a query per request, and because logging is deferred through
+`waitUntil` the count would lag exactly when traffic spikes. `period` accepts
+only 10 or 60, so both limits are expressed per 60s.
+
+The first implementation charged the free bucket on **every** request, intending
+to make a forged payment header pointless. That would have capped genuine paying
+callers at 10/min and silently defeated the 60/min limit they are paying for.
+
+Corrected: exactly one bucket is charged per request, so the ceilings stay
+independent. A forged header does reach the 60/min bucket, which is the right
+trade — the payment is still rejected downstream, so it buys 60 rejections a
+minute instead of 10, served without touching D1 and granting no data access.
+
+Verified: 14 rapid unauthenticated requests gave `200 200 200 200` then ten
+`429`s; 20 consecutive requests carrying a payment header gave twenty `402`s and
+**zero** `429`s. `/v1/health` and `/.well-known/x402` returned 200 fourteen and
+twelve times running — never limited, because they are how a caller distinguishes
+an outage from a throttle.
