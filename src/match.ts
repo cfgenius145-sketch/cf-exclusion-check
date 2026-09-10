@@ -102,23 +102,35 @@ export function validateQuery(q: Query): { ok: true } | { ok: false; error: stri
 /**
  * Build the candidate SQL and parameters.
  *
- * Kept as a single UNION so one D1 query covers every strategy — the free plan
- * allows only 50 D1 queries per Worker invocation, so a query per strategy
- * would be wasteful.
+ * ONE SELECT with OR/IN, not a UNION of per-strategy SELECTs.
+ *
+ * The UNION form looked tidier but was unshippable: D1 caps a compound SELECT
+ * at 5 terms, and the clause count grows with the name. "Jamsheed Abadi"
+ * produced exactly 5 and worked, which is why it survived every early test —
+ * but "Mary Jane Smith" produces 7, and a two-part name plus an NPI produces 6.
+ * Both failed outright with "too many terms in compound SELECT: SQLITE_ERROR".
+ * Ordinary three-part names are not an edge case.
+ *
+ * OR/IN has no term ceiling, and SQLite still uses the indexes: each disjunct is
+ * a separate index lookup combined with OR-by-union-of-rowids. Only one D1 query
+ * is spent either way, which matters because the free plan allows 50 per
+ * invocation.
+ *
+ * An empty value is never bound. Binding '' for a missing NPI would match every
+ * row whose NPI is absent — about 75,000 of them — which is both wrong and the
+ * kind of thing that silently burns the daily row-read budget.
  */
 export function buildCandidateQuery(q: Query): { sql: string; params: string[] } {
-  // Street address is deliberately NOT selected. It is never returned by any
-  // endpoint, and not fetching it keeps it out of logs and error dumps.
   const cols = `id, source, last_name, first_name, mid_name, bus_name, general,
     specialty, upin, npi, dob, city, state, zip, excl_type, excl_date,
     reinstate_date, waiver_date, waiver_state`;
 
-  const clauses: string[] = [];
+  const terms: string[] = [];
   const params: string[] = [];
 
   const npi = normalizeNpi(q.npi);
   if (npi) {
-    clauses.push(`SELECT ${cols} FROM exclusions WHERE npi = ?`);
+    terms.push("npi = ?");
     params.push(npi);
   }
 
@@ -126,30 +138,42 @@ export function buildCandidateQuery(q: Query): { sql: string; params: string[] }
   if (name) {
     const bus = normalizeBusiness(name);
     if (bus) {
-      clauses.push(`SELECT ${cols} FROM exclusions WHERE n_bus = ?`);
+      terms.push("n_bus = ?");
       params.push(bus);
     }
+
+    const fullKeys: string[] = [];
+    const lastKeys: string[] = [];
     for (const pair of candidateNamePairs(name)) {
       const key = fullKey(pair.last, pair.first);
-      if (key) {
-        clauses.push(`SELECT ${cols} FROM exclusions WHERE n_full = ?`);
-        params.push(key);
-      }
-      if (pair.last) {
-        clauses.push(`SELECT ${cols} FROM exclusions WHERE n_last = ?`);
-        params.push(pair.last);
-      }
+      if (key && !fullKeys.includes(key)) fullKeys.push(key);
+      if (pair.last && !lastKeys.includes(pair.last)) lastKeys.push(pair.last);
+    }
+
+    // Bound so a pathological query cannot inflate the parameter count; D1
+    // allows 100 bound parameters per query and we stay far below it.
+    const cappedFull = fullKeys.slice(0, 8);
+    const cappedLast = lastKeys.slice(0, 8);
+
+    if (cappedFull.length) {
+      terms.push(`n_full IN (${cappedFull.map(() => "?").join(",")})`);
+      params.push(...cappedFull);
+    }
+    if (cappedLast.length) {
+      terms.push(`n_last IN (${cappedLast.map(() => "?").join(",")})`);
+      params.push(...cappedLast);
     }
   }
 
-  // Bound-parameter ceiling on the free plan is 100; we are far below it, but
-  // cap the strategy count so a pathological query cannot blow past it.
-  const capped = clauses.slice(0, 12);
-  const cappedParams = params.slice(0, 12);
+  // validateQuery guarantees at least one term, but never emit a bare WHERE
+  // that would select the whole table if that ever stopped being true.
+  if (!terms.length) {
+    return { sql: `SELECT ${cols} FROM exclusions WHERE 0 LIMIT 0`, params: [] };
+  }
 
   return {
-    sql: `${capped.join("\nUNION\n")}\nLIMIT 200`,
-    params: cappedParams,
+    sql: `SELECT ${cols} FROM exclusions WHERE ${terms.join(" OR ")} LIMIT 200`,
+    params,
   };
 }
 

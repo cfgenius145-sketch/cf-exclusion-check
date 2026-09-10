@@ -9,6 +9,7 @@ import {
   normalizeState,
 } from "../src/normalize";
 import {
+  buildCandidateQuery,
   classify,
   isCurrentlyExcluded,
   overallConfidence,
@@ -178,3 +179,61 @@ describe("matching", () => {
     expect(isCurrentlyExcluded(personRow)).toBe(true);
   });
 });
+
+describe("candidate query", () => {
+  // Both regressions below were shipped to production and only found by running
+  // real traffic. The unit tests all passed throughout, because they exercise
+  // classify() on fixture arrays and never execute SQL.
+
+  it("emits a single SELECT, never a compound one", () => {
+    // D1 caps a compound SELECT at 5 terms. The old UNION form produced 7 for
+    // an ordinary three-part name and failed with SQLITE_ERROR.
+    for (const name of ["Mary Jane Smith", "Juan Carlos De La Cruz", "Jamsheed Abadi"]) {
+      const { sql } = buildCandidateQuery({ name });
+      expect(sql).not.toContain("UNION");
+      expect(sql.match(/SELECT/gi)).toHaveLength(1);
+    }
+  });
+
+  it("handles a three-part name, which the UNION form could not", () => {
+    const { sql, params } = buildCandidateQuery({ name: "Mary Jane Smith" });
+    expect(params.length).toBeGreaterThan(0);
+    expect(sql).toContain("n_full IN");
+    expect(sql).toContain("n_last IN");
+  });
+
+  it("handles a name plus an npi together", () => {
+    const { sql, params } = buildCandidateQuery({ name: "Jamsheed Abadi", npi: "1477537496" });
+    expect(sql).toContain("npi = ?");
+    expect(params).toContain("1477537496");
+  });
+
+  it("never binds an empty string", () => {
+    // Binding '' for a missing NPI would match every row whose NPI is absent —
+    // about 75,000 of them — burning the daily row-read budget on a wrong answer.
+    for (const q of [{ name: "Smith" }, { npi: "1477537496" }, { name: "Acme LLC" }]) {
+      const { params } = buildCandidateQuery(q);
+      for (const p of params) expect(p).not.toBe("");
+    }
+  });
+
+  it("omits the npi term entirely when no npi is supplied", () => {
+    const { sql } = buildCandidateQuery({ name: "Smith, John" });
+    expect(sql).not.toContain("npi =");
+  });
+
+  it("stays well inside D1's 100-bound-parameter ceiling", () => {
+    const { params } = buildCandidateQuery({
+      name: "Ana Maria Jose Carlos De La Santa Cruz Del Rio",
+      npi: "1477537496",
+    });
+    expect(params.length).toBeLessThanOrEqual(20);
+  });
+
+  it("selects no rows rather than the whole table if all terms vanish", () => {
+    const { sql, params } = buildCandidateQuery({});
+    expect(params).toHaveLength(0);
+    expect(sql).toContain("WHERE 0");
+  });
+});
+
