@@ -9,8 +9,8 @@ import type { Env } from "../src/env";
  */
 const env = {
   SERVICE_NAME: "CF Exclusion Check",
-  PRICE_CHECK: "$0.01",
-  PRICE_REPORT: "$0.25",
+  PRICE_CHECK: "$0.05",
+  PRICE_REPORT: "$0.50",
   NETWORK: "eip155:84532",
   get DB(): D1Database {
     throw new Error("a free MCP method must not touch D1");
@@ -29,7 +29,7 @@ describe("mcp protocol", () => {
   it("initialize states the price, so an agent learns the cost before paying", () => {
     return handleMcp(env, { jsonrpc: "2.0", id: 1, method: "initialize" })
       .then((out) => {
-        expect((out?.payload as any).result.instructions).toContain("$0.01");
+        expect((out?.payload as any).result.instructions).toContain("$0.05");
       });
   });
 
@@ -42,7 +42,7 @@ describe("mcp protocol", () => {
   it("the paid tool advertises its price in its description", async () => {
     const out = await handleMcp(env, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     const paid = (out?.payload as any).result.tools[0];
-    expect(paid.description).toContain("$0.01");
+    expect(paid.description).toContain("$0.05");
     expect(paid.inputSchema.additionalProperties).toBe(false);
   });
 

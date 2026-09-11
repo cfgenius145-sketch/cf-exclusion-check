@@ -73,8 +73,8 @@
     "PAY_TO": "0xCa28eb92657F8a81aFb5493b3a04A740B204d816",
     "FACILITATOR_URL": "https://api.cdp.coinbase.com/platform/v2/x402",
     "LEIE_CSV_URL": "https://oig.hhs.gov/exclusions/downloadables/UPDATED.csv",
-    "PRICE_CHECK": "$0.01",
-    "PRICE_REPORT": "$0.25",
+    "PRICE_CHECK": "$0.05",
+    "PRICE_REPORT": "$0.50",
     "SERVICE_NAME": "CF Exclusion Check"
   }
 }

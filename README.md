@@ -52,11 +52,11 @@ official record at <https://exclusions.oig.hhs.gov> (LEIE) or
 
 | endpoint | price | notes |
 |---|---|---|
-| `POST\|GET /v1/check` | **$0.01** | verdict, confidence, basis, reason per match |
-| `POST\|GET /v1/report` | **$0.25** | every match with full source fields |
+| `POST\|GET /v1/check` | **$0.05** | verdict, confidence, basis, reason per match |
+| `POST\|GET /v1/report` | **$0.50** | every match with full source fields |
 | `GET /v1/health` | free | row counts, load dates, freshness |
 | `GET /.well-known/x402` | free | discovery document (also at `…/x402.json`) |
-| `POST /mcp` | $0.01 per paid tool call | JSON-RPC; discovery is free |
+| `POST /mcp` | $0.05 per paid tool call | JSON-RPC; discovery is free |
 | `POST /admin/reload` | — | `ADMIN_TOKEN` required |
 
 ### Query fields
@@ -113,12 +113,13 @@ An unpaid call returns **402** with the machine-readable challenge in the
 `payment-required` header (base64 JSON, x402 v2):
 
 ```json
-{"x402Version":2,"accepts":[{"scheme":"exact","network":"eip155:84532",
-  "amount":"10000","asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-  "payTo":"0x…","maxTimeoutSeconds":60,"extra":{"name":"USDC","version":"2"}}]}
+{"x402Version":2,"accepts":[{"scheme":"exact","network":"eip155:8453",
+  "amount":"50000","asset":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "payTo":"0xCa28eb92657F8a81aFb5493b3a04A740B204d816","maxTimeoutSeconds":60,
+  "extra":{"name":"USD Coin","version":"2","paymentFlow":"authorization"}}]}
 ```
 
-`amount` is atomic USDC (6 decimals): `10000` = $0.01.
+`amount` is atomic USDC (6 decimals): `50000` = $0.05, `500000` = $0.50.
 
 ```bash
 node scripts/x402-client.mjs               # /v1/check
@@ -136,7 +137,7 @@ curl -X POST $BASE/mcp -H 'content-type: application/json' \
 
 | tool | price |
 |---|---|
-| `exclusion_check` | $0.01 per call |
+| `exclusion_check` | $0.05 per call |
 | `exclusion_sources` | free |
 
 `initialize`, `ping` and `tools/list` are free so an agent can discover the tool

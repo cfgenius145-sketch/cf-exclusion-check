@@ -6,8 +6,8 @@ export interface Env {
   NETWORK: string;            // CAIP-2, e.g. eip155:84532 (Base Sepolia)
   FACILITATOR_URL: string;
   LEIE_CSV_URL: string;
-  PRICE_CHECK: string;        // "$0.01"
-  PRICE_REPORT: string;       // "$0.25"
+  PRICE_CHECK: string;        // "$0.05"
+  PRICE_REPORT: string;       // "$0.50"
   SERVICE_NAME: string;
 
   // secrets (wrangler secret put)

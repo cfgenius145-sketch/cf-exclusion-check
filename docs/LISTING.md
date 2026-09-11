@@ -12,14 +12,14 @@ CF Exclusion Check
 ## One line
 
 Screen any name or entity against the federal exclusion lists — OIG LEIE and
-SAM.gov — for $0.01, and get told why it matched.
+SAM.gov — for $0.05, and get told why it matched.
 
 ## Short description (≤ 280 chars)
 
 Pay-per-call screening against the HHS-OIG LEIE and SAM.gov exclusions —
 247,583 records including reinstatement history. Match by name, NPI, UEI or
 CAGE. Every result states its confidence and the exact basis it matched on.
-$0.01 per check, $0.25 for a full report. MCP tool included.
+$0.05 per check, $0.50 for a full report. MCP tool included.
 
 ## Long description
 
@@ -64,10 +64,10 @@ generation has fallen behind the upstream file.
 
 | endpoint | price |
 |---|---|
-| `/v1/check` | $0.01 |
-| `/v1/report` — every match, full source fields | $0.25 |
+| `/v1/check` | $0.05 |
+| `/v1/report` — every match, full source fields | $0.50 |
 | `/v1/health`, `/.well-known/x402` | free |
-| MCP `exclusion_check` | $0.01 per call |
+| MCP `exclusion_check` | $0.05 per call |
 | MCP `exclusion_sources` | free |
 
 Paid in USDC over x402. Currently on **Base Sepolia testnet**.

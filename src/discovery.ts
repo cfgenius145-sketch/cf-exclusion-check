@@ -68,7 +68,7 @@ function asset(network: string): { address: string; symbol: string; decimals: nu
   }
 }
 
-/** "$0.01" -> "10000" (USDC has 6 decimals). */
+/** "$0.05" -> "50000" (USDC has 6 decimals). */
 function atomicAmount(price: string, decimals: number): string {
   const dollars = Number(String(price).replace(/[^0-9.]/g, ""));
   if (!Number.isFinite(dollars)) return "0";
