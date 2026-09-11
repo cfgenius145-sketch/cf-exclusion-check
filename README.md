@@ -128,6 +128,26 @@ node scripts/x402-client.mjs /v1/report "Some Name"
 
 Gas is paid by the facilitator under EIP-3009, so a payer needs USDC only.
 
+### Staying listed in the Bazaar (30-day keepalive)
+
+`/v1/check` has been listed in CDP's Bazaar since a settlement on 2026-09-11.
+The Bazaar removes a route that goes **30 days without a settled payment**, and
+eventually drops one whose bare URL stops answering `402 Payment Required`. So:
+
+- Settle at least one paid call per listed route inside every 30-day window;
+  run `./scripts/verify-mainnet.sh` (one $0.05 `/v1/check`) at least every
+  three weeks. `/v1/report` is not listed and will not be until a $0.50 report
+  call settles.
+- Check the listing without paying:
+
+```bash
+./scripts/verify-mainnet.sh --bazaar-only
+curl -s "https://api.cdp.coinbase.com/platform/v2/x402/discovery/merchant?payTo=0xCa28eb92657F8a81aFb5493b3a04A740B204d816"
+```
+
+The payout address is shared with booth #2 (cf-package-check), so the merchant
+lookup lists both booths' routes; `--bazaar-only` counts only this host.
+
 ## MCP
 
 ```bash
