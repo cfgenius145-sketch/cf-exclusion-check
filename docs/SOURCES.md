@@ -667,3 +667,56 @@ Route descriptions and tags are now written for retrieval — both sources, the
 record count, every accepted identifier, and the phrases a buyer would actually
 search. **The indexed copy refreshes on the next settled payment**, so a
 metadata change is not live in the catalog until one more call is paid for.
+
+---
+
+## CDP facilitator rejects oversized route metadata (2026-09-11)
+
+Enriching the route `description` and `tags` for discoverability **broke
+payments outright**. Every paid request failed with:
+
+```
+402, body {}
+payment-required → error: Facilitator verify failed (400):
+  'paymentPayload' is invalid: must match one of [x402V2Pay...   (CDP truncates its own message)
+```
+
+An empty `{}` body is the giveaway: that is `settlementFailedResponseBody`'s
+default, not the unpaid challenge, so the payment had been presented and
+rejected downstream rather than never attempted.
+
+Bisected by reverting `src/payment.ts` to the exact revision that was live
+during a known-good settlement — payment succeeded immediately. The diff was
+**only** description and tags:
+
+| | working | broken |
+|---|---|---|
+| description | 120 chars | 631 chars |
+| tags | 4 | 10 |
+
+Ruled out along the way:
+
+- **`extra.paymentFlow`** — removing the pin left `extra` as
+  `{name, version}` and verify still failed.
+- **Non-ASCII** — the description's em dash (U+2014) was the only non-ASCII
+  character in the file; replacing all 7 with hyphens did not help.
+
+So the constraint is metadata **size**, not content. CDP does not document a
+limit and its error names `paymentPayload`, which is misleading: the payload is
+fine, the accompanying requirements are too large.
+
+Current values, which settle reliably: descriptions of 127 and 120 characters,
+5 tags each.
+
+**Practical consequence: the Bazaar listing copy is capacity-constrained.** Name
+both sources and the identifiers, then stop. Test any metadata change with a
+real paid call before assuming it is cosmetic — a failed verify costs nothing,
+which makes it cheap to check, but shipping it silently disables revenue.
+
+### Indexing is per-route and refreshes on payment
+
+Each route indexes on **its own** first settled payment, and its stored
+description/tags are whatever were live at that moment. `/v1/report` carries the
+newer copy because it was first paid after the change; `/v1/check` still carries
+the original wording from its earlier payment. Metadata edits therefore do not
+reach the catalog until that specific route is paid for again.

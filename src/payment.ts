@@ -120,41 +120,29 @@ function routesFor(env: Env, payTo: string) {
 
   const check = {
     accepts: { ...common, price: env.PRICE_CHECK },
-    // This string is what the Bazaar indexes and what agents match against, so
-    // it names both sources and every identifier the endpoint accepts. The
-    // earlier version mentioned only the OIG LEIE and no identifiers, and the
-    // indexed record showed it: the service ranked 3rd of 5 for "healthcare
-    // exclusion screening" and did not appear at all for "check if a provider
-    // is excluded from medicare".
     description:
-      "Check whether a person or business is excluded or debarred from US " +
-      "federal programs. Screens the HHS-OIG List of Excluded Individuals and " +
-      "Entities (LEIE) and the SAM.gov exclusions list — 247,583 records, " +
-      "including reinstatement history. Match by name, NPI, SAM UEI or CAGE " +
-      "code, optionally narrowed by date of birth or state. Returns a verdict, " +
-      "a confidence level, the basis of each match and the reason it matched. " +
-      "Use for provider credentialing, Medicare/Medicaid exclusion screening, " +
-      "vendor debarment checks and healthcare compliance due diligence.",
+      // Kept deliberately short. A 631-character description with 10 tags made
+      // the CDP facilitator reject verify with
+      //   'paymentPayload' is invalid: must match one of [x402V2Pay...
+      // and reverting this exact string restored a settling payment, so the
+      // metadata size is load-bearing. Name both sources and every identifier,
+      // then stop.
+      "Screen a person or business against the HHS-OIG LEIE and SAM.gov " +
+      "exclusion lists. Match by name, NPI, UEI or CAGE.",
     mimeType: "application/json",
     serviceName: env.SERVICE_NAME,
-    tags: ["healthcare", "compliance", "screening", "exclusions", "sam-gov",
-           "debarment", "credentialing", "oig", "leie", "medicare"],
+    tags: ["healthcare", "compliance", "screening", "exclusions", "sam-gov"],
     unpaidResponseBody: () => unpaidBody(env, "/v1/check", env.PRICE_CHECK),
   };
 
   const report = {
     accepts: { ...common, price: env.PRICE_REPORT },
     description:
-      "Full exclusion and debarment report for a person or business, across the " +
-      "HHS-OIG LEIE and SAM.gov exclusions. Returns every matching record with " +
-      "complete source fields: exclusion type and authority, excluding agency, " +
-      "classification, exclusion, reinstatement and termination dates, NPI, " +
-      "SAM UEI and CAGE code, plus the data generation it was screened against. " +
-      "Match by name, NPI, UEI or CAGE.",
+      "Full exclusion report from the HHS-OIG LEIE and SAM.gov: every match " +
+      "with agency, dates, NPI, UEI and CAGE.",
     mimeType: "application/json",
     serviceName: env.SERVICE_NAME,
-    tags: ["healthcare", "compliance", "screening", "exclusions", "sam-gov",
-           "debarment", "credentialing", "oig", "leie", "medicare"],
+    tags: ["healthcare", "compliance", "screening", "exclusions", "sam-gov"],
     unpaidResponseBody: () => unpaidBody(env, "/v1/report", env.PRICE_REPORT),
   };
 
