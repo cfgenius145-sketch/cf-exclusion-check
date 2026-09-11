@@ -11,27 +11,39 @@ CF Exclusion Check
 
 ## One line
 
-Screen any name against the federal healthcare exclusion list for $0.01, and get
-told why it matched.
+Screen any name or entity against the federal exclusion lists — OIG LEIE and
+SAM.gov — for $0.01, and get told why it matched.
 
 ## Short description (≤ 280 chars)
 
-Pay-per-call screening against the HHS-OIG List of Excluded Individuals and
-Entities. 85,036 records including reinstatement history. Every result states
-its confidence and the exact basis it matched on. $0.01 per check, $0.25 for a
-full report. MCP tool included.
+Pay-per-call screening against the HHS-OIG LEIE and SAM.gov exclusions —
+247,583 records including reinstatement history. Match by name, NPI, UEI or
+CAGE. Every result states its confidence and the exact basis it matched on.
+$0.01 per check, $0.25 for a full report. MCP tool included.
 
 ## Long description
 
 CF Exclusion Check answers one question well: **is this person or business
-excluded from federal healthcare programs?**
+excluded from federal programs?**
 
-It screens the HHS-OIG LEIE — 83,975 active exclusion records — plus 1,061
-reinstatement records covering 20 months of supplements. That second source is
-what makes the answer useful. The official active list contains only currently
-excluded subjects, so anyone reinstated silently vanishes from it, and a plain
-"no match" hides their history. This service tells you instead: *matched,
-excluded 2020-01-20, reinstated 2025-01-22, not currently excluded.*
+It screens two federal sources — 247,583 records in total:
+
+- **HHS-OIG LEIE**, 83,975 active healthcare exclusion records, plus 1,061
+  reinstatement records covering 20 months of supplements.
+- **SAM.gov exclusions**, 162,547 government-wide records. Despite the common
+  assumption that SAM is a business list, 79.1% of its records are individuals;
+  15.2% are Special Entity Designations, 4.9% firms and 0.8% vessels. The
+  largest excluding agencies are HHS, OFAC and OPM.
+
+Organisations can be matched on their **UEI** (12 characters) or **CAGE** code,
+which are registry-assigned unique identifiers — an exact hit on either is as
+strong a signal as an NPI hit is for a person.
+
+The reinstatement records are what make a negative answer useful. The official
+LEIE active list contains only currently excluded subjects, so anyone reinstated
+silently vanishes from it and a plain "no match" hides their history. This
+service tells you instead: *matched, excluded 2020-01-20, reinstated
+2025-01-22, not currently excluded.*
 
 Every result is explainable. You get a verdict, a confidence level, and the
 basis the match was built on — an NPI, a full name, a business name, or merely a
@@ -68,28 +80,29 @@ committing to a paid call.
 
 ## Tags
 
-`healthcare` `compliance` `screening` `exclusions` `oig` `leie` `mcp`
-`background-check` `credentialing`
+`healthcare` `compliance` `screening` `exclusions` `oig` `leie` `sam-gov`
+`debarment` `mcp` `background-check` `credentialing`
 
 ## Who it is for
 
 - credentialing and provider-enrolment teams
 - healthcare staffing and locum agencies
 - compliance vendors building screening into their own products
-- agents doing due diligence on healthcare counterparties
+- agents doing due diligence on healthcare or federal-contracting counterparties
+- procurement and vendor-onboarding teams checking federal debarment
 
 ## What it is not
 
 State this plainly wherever the service is listed:
 
-- It screens the **HHS-OIG LEIE only** — not SAM.gov, not state Medicaid
+- It screens the **HHS-OIG LEIE and SAM.gov exclusions** — not state Medicaid
   exclusion lists, not licensure board actions.
 - A match is a **name match, not an identity determination**. A non-match is not
   a clearance.
-- Results reflect the loaded data generation reported by `/v1/health`, not a
-  live query against OIG.
+- Results reflect the loaded data generations reported by `/v1/health`, not a
+  live query against OIG or SAM.gov.
 - Anyone acting on a result should confirm it against the official record at
-  <https://exclusions.oig.hhs.gov>.
+  <https://exclusions.oig.hhs.gov> (LEIE) or <https://sam.gov/search> (SAM).
 
 ## Example
 
@@ -121,13 +134,19 @@ Response shape:
       "currently_excluded": true
     }
   }],
-  "sources": [{ "source": "leie", "rows": 83975, "loaded_at": "…", "reseed_due": false }],
-  "disclaimer": "Name-based screening against the HHS-OIG LEIE generation identified under `sources`. …"
+  "sources": [
+    { "source": "leie",      "rows": 83975,  "complete": true },
+    { "source": "leie_rein", "rows": 1061,   "complete": true },
+    { "source": "sam",       "rows": 162547, "complete": true }
+  ],
+  "coverage": { "complete": true, "note": "All sources fully loaded." },
+  "disclaimer": "Screening against the HHS-OIG LEIE and SAM.gov exclusion data generations identified under `sources`. …"
 }
 ```
 
 ## Attribution
 
-LEIE data is published by the HHS Office of Inspector General and is in the
+LEIE data is published by the HHS Office of Inspector General; SAM.gov exclusion
+data is published by the U.S. General Services Administration. Both are in the
 public domain. This service is not affiliated with, endorsed by, or operated on
-behalf of HHS-OIG.
+behalf of HHS-OIG, GSA or SAM.gov.

@@ -26,9 +26,11 @@ export function endpoints(env: Env): DiscoveryEndpoint[] {
       path: "/v1/check", method: "POST",
       price: env.PRICE_CHECK,
       description:
-        "Screen one name (optionally with NPI, date of birth, or state) against " +
-        "the HHS-OIG List of Excluded Individuals and Entities. Returns a verdict, " +
-        "a confidence level, and the reason each record matched.",
+        "Screen one name or identifier against the HHS-OIG List of Excluded " +
+        "Individuals and Entities (LEIE) and the SAM.gov exclusions list. " +
+        "Accepts name, NPI, UEI, CAGE, date of birth and state. Returns a " +
+        "verdict, a confidence level, the basis of each match, and the reason " +
+        "it matched.",
       free: false,
     },
     {
@@ -36,8 +38,9 @@ export function endpoints(env: Env): DiscoveryEndpoint[] {
       price: env.PRICE_REPORT,
       description:
         "Full screening report: every matching record with complete source " +
-        "fields, exclusion and reinstatement dates, exclusion authority, and " +
-        "load provenance for the data it was screened against.",
+        "fields, exclusion, reinstatement and termination dates, excluding " +
+        "agency, classification, and load provenance for the data it was " +
+        "screened against.",
       free: false,
     },
     {
@@ -105,14 +108,16 @@ export function discoveryDocument(env: Env, origin: string): unknown {
     name: env.SERVICE_NAME,
     description:
       "Pay-per-call screening against the HHS-OIG List of Excluded Individuals " +
-      "and Entities (LEIE). Every result states why it matched.",
+      "and Entities (LEIE) and the SAM.gov exclusions list. Every result states " +
+      "why it matched.",
     // Declared plainly rather than implied: the service is only as current as
     // its last load, and a name match is not an identity determination.
     limitations: [
-      "Screens the HHS-OIG LEIE only. It does not screen SAM.gov, state " +
-      "Medicaid exclusion lists, or any licensure board action.",
+      "Screens the HHS-OIG LEIE and SAM.gov exclusions. It does not screen " +
+      "state Medicaid exclusion lists or licensure board actions.",
       "A match is a name match, not an identity determination. Confirm against " +
-      "the official record at https://exclusions.oig.hhs.gov before acting.",
+      "the official record at https://exclusions.oig.hhs.gov (LEIE) or " +
+      "https://sam.gov/search (SAM) before acting.",
       "Results reflect the loaded data generation reported by /v1/health, not " +
       "a live query against OIG.",
     ],

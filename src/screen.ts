@@ -35,13 +35,54 @@ export interface SourceInfo {
   sha256: string | null;
   reseed_due?: boolean;
   upstream_last_modified?: string | null;
+  /** False while a multi-day load is still in progress. */
+  complete?: boolean;
+  rows_expected?: number | null;
+}
+
+/**
+ * Is every source fully loaded?
+ *
+ * This governs how a non-match may be described. SAM.gov is 162,547 rows and
+ * D1's free plan allows 100,000 row writes per day (index entries included), so
+ * the load spans several days. While it is in progress a "no match" means "not
+ * found in what has been loaded so far", which is emphatically not a clearance,
+ * and every response has to say so.
+ */
+export function coverageOf(sources: SourceInfo[]): {
+  complete: boolean;
+  note: string;
+  incomplete_sources: string[];
+} {
+  const partial = sources.filter((s) => s.complete === false);
+  if (!partial.length) {
+    return {
+      complete: true,
+      note: "All sources fully loaded.",
+      incomplete_sources: [],
+    };
+  }
+  const names = partial.map((s) => s.source);
+  const detail = partial
+    .map((s) => `${s.source} ${s.rows.toLocaleString()}/` +
+                `${(s.rows_expected ?? 0).toLocaleString()}`)
+    .join(", ");
+  return {
+    complete: false,
+    note:
+      `INCOMPLETE: ${detail} rows loaded. A non-match against a partially ` +
+      `loaded source is NOT a clearance — the record may simply not be loaded ` +
+      `yet. Matches that are returned remain valid.`,
+    incomplete_sources: names,
+  };
 }
 
 export const DISCLAIMER =
-  "Name-based screening against the HHS-OIG LEIE generation identified under " +
-  "`sources`. A match is not an identity determination and a non-match is not " +
-  "a clearance. Confirm any result against the official record at " +
-  "https://exclusions.oig.hhs.gov before taking action against a person.";
+  "Screening against the HHS-OIG LEIE and SAM.gov exclusion data generations " +
+  "identified under `sources`. A name match is not an identity determination " +
+  "and a non-match is not a clearance. Confirm any result against the official " +
+  "record at https://exclusions.oig.hhs.gov (LEIE) or https://sam.gov/search " +
+  "(SAM) before taking action against a person or business.";
 
 /**
  * Decide the verdict from classified matches.
@@ -79,6 +120,11 @@ function briefRecord(row: ExclusionRow) {
     npi: row.npi || null,
     state: row.state || null,
     exclusion_type: row.excl_type || null,
+    classification: row.classification || null,
+    excluding_agency: row.agency_name || row.agency_code || null,
+    uei: row.uei || null,
+    cage: row.cage || null,
+    termination_date: row.termination_date || null,
     exclusion_date: row.excl_date || null,
     reinstatement_date: row.reinstate_date || null,
     currently_excluded: isCurrentlyExcluded(row),
@@ -93,6 +139,10 @@ function fullRecord(row: ExclusionRow) {
     general_category: row.general || null,
     specialty: row.specialty || null,
     upin: row.upin || null,
+    program: row.program || null,
+    agency_code: row.agency_code || null,
+    record_status: row.record_status || null,
+    country: row.country || null,
     date_of_birth: row.dob || null,
     city: row.city || null,
     zip: row.zip || null,
@@ -124,13 +174,18 @@ export async function sourceInfo(env: Env): Promise<SourceInfo[]> {
             (SELECT s.reseed_due FROM source_state s
                WHERE s.source = e.source)                     AS reseed_due,
             (SELECT s.upstream_last_modified FROM source_state s
-               WHERE s.source = e.source)                     AS upstream_last_modified
+               WHERE s.source = e.source)                     AS upstream_last_modified,
+            (SELECT p.status FROM source_load_progress p
+               WHERE p.source = e.source)                     AS load_status,
+            (SELECT p.rows_expected FROM source_load_progress p
+               WHERE p.source = e.source)                     AS rows_expected
        FROM exclusions e
       GROUP BY e.source
       ORDER BY e.source`,
   ).all<{
     source: string; n_rows: number; loaded_at: string | null; sha256: string | null;
     reseed_due: number | null; upstream_last_modified: string | null;
+    load_status: string | null; rows_expected: number | null;
   }>();
 
   return (results ?? []).map((r) => ({
@@ -140,6 +195,10 @@ export async function sourceInfo(env: Env): Promise<SourceInfo[]> {
     sha256: r.sha256,
     reseed_due: Boolean(r.reseed_due),
     upstream_last_modified: r.upstream_last_modified,
+    // No progress row means the source was loaded in one pass and is complete;
+    // only an explicit 'partial' marks it incomplete.
+    complete: r.load_status !== "partial",
+    rows_expected: r.rows_expected,
   }));
 }
 

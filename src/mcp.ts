@@ -16,7 +16,7 @@
  */
 import type { Env } from "./env";
 import { validateQuery, type Query } from "./match";
-import { DISCLAIMER, screen, sourceInfo } from "./screen";
+import { DISCLAIMER, coverageOf, screen, sourceInfo } from "./screen";
 
 export const PROTOCOL_VERSION = "2025-06-18";
 
@@ -44,10 +44,11 @@ function toolDefinitions(env: Env) {
       title: "Check a healthcare exclusion",
       description:
         `Screen a person or business against the HHS-OIG List of Excluded ` +
-        `Individuals and Entities (LEIE). Costs ${env.PRICE_CHECK} per call via ` +
-        `x402. Returns a verdict, a confidence level, the basis of each match, ` +
-        `and the reason it matched. A match is a name match, not an identity ` +
-        `determination.`,
+        `Individuals and Entities (LEIE) AND the SAM.gov exclusions list. ` +
+        `Costs ${env.PRICE_CHECK} per call via x402. Returns a verdict, a ` +
+        `confidence level, the basis of each match, and the reason it matched. ` +
+        `A match is a name match unless it was made on an identifier (npi, ` +
+        `uei, cage); it is not an identity determination.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -60,6 +61,18 @@ function toolDefinitions(env: Env) {
           npi: { type: "string", description: "10-digit National Provider Identifier." },
           dob: { type: "string", description: "Date of birth, YYYYMMDD." },
           state: { type: "string", description: "Two-letter state code. Corroborates only." },
+          uei: {
+            type: "string",
+            description:
+              "SAM.gov Unique Entity Identifier, exactly 12 alphanumeric " +
+              "characters. An exact match is a strong identifier.",
+          },
+          cage: {
+            type: "string",
+            description:
+              "CAGE code, exactly 5 alphanumeric characters. An exact match is " +
+              "a strong identifier. Present on only ~0.3% of SAM records.",
+          },
         },
         additionalProperties: false,
       },
@@ -68,8 +81,9 @@ function toolDefinitions(env: Env) {
       name: "exclusion_sources",
       title: "Data sources and freshness",
       description:
-        "List the loaded exclusion sources, their row counts, load dates and " +
-        "whether a bulk reseed is due. Free.",
+        "List the loaded exclusion sources (OIG LEIE and SAM.gov), their row " +
+        "counts, load dates, load completeness and whether a bulk reseed is " +
+        "due. Free.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
     },
   ];
@@ -82,6 +96,8 @@ function queryFromArgs(args: Record<string, unknown>): Query {
     npi: args.npi != null ? String(args.npi) : undefined,
     dob: args.dob != null ? String(args.dob) : undefined,
     state: typeof args.state === "string" ? args.state : undefined,
+    uei: args.uei != null ? String(args.uei) : undefined,
+    cage: args.cage != null ? String(args.cage) : undefined,
   };
 }
 
@@ -166,6 +182,7 @@ export async function handleMcp(
         query: {
           name: q.name ?? null, npi: q.npi ?? null,
           dob: q.dob ?? null, state: q.state ?? null,
+          uei: q.uei ?? null, cage: q.cage ?? null,
         },
         verdict: result.verdict,
         confidence: result.confidence,
@@ -174,6 +191,7 @@ export async function handleMcp(
         truncated: result.truncated,
         matches: result.matches,
         sources,
+        coverage: coverageOf(sources),
         disclaimer: DISCLAIMER,
         checked_at: new Date().toISOString(),
       };

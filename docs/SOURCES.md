@@ -428,3 +428,111 @@ Verified: 14 rapid unauthenticated requests gave `200 200 200 200` then ten
 **zero** `429`s. `/v1/health` and `/.well-known/x402` returned 200 fourteen and
 twelve times running — never limited, because they are how a caller distinguishes
 an outage from a throttle.
+
+---
+
+## SAM.gov as a second source, verified 2026-09-11
+
+### The API cannot be paged; the extract is mandatory
+
+`https://api.sam.gov/entity-information/v4/exclusions` (v1-v3 retired).
+API key passes as `?api_key=`. Docs: https://open.gsa.gov/api/exclusions-api/
+
+| limit | value |
+|---|---|
+| `size` (records per page) | **1-10** |
+| `page` | 0-999 |
+| rate limit, personal key **no role** | **10 requests/day** |
+| rate limit, personal key with role / system | 1,000/day |
+| federal system account | 10,000/day |
+
+168,452 records at 10 per page is ~16,846 requests. Against 10-1,000 requests a
+day, paging is not slow — it is impossible. The asynchronous extract is the only
+viable path:
+
+```
+GET /entity-information/v4/exclusions?api_key=..&format=json   -> returns a token
+GET /entity-information/v4/download-exclusions?api_key=..&token=..
+```
+
+Two traps in the extract:
+
+1. **It is gzip**, despite the `.json` naming and a `text/plain` content type.
+   21,238,535 bytes compressed, 466 MB raw.
+2. **Its `totalRecords` field says `10000` and is simply wrong.** The array holds
+   all 168,452 records. Count the array; never trust the field.
+
+### What is actually in it
+
+Measured, not assumed — and it contradicts the common assumption that SAM is a
+business list:
+
+| classification | count | share |
+|---|---|---|
+| Individual | 133,261 | 79.1% |
+| Special Entity Designation | 25,585 | 15.2% |
+| Firm | 8,284 | 4.9% |
+| Vessel | 1,322 | 0.8% |
+
+Identifier population:
+
+| field | populated |
+|---|---|
+| `entityName` | 168,452 (100%) |
+| `lastName` | 133,254 (79.1%) |
+| `ueiSAM` | 47,671 (28.3%) |
+| `npi` | 19,653 (11.7%) raw — but 12,113 of those are the `0000000000` placeholder and 296 are whitespace, leaving **7,244** real |
+| `cageCode` | 429 (0.3%) |
+| `dnbOpenData` (DUNS) | **0 (0.0%)** |
+
+DUNS is stored but deliberately **not indexed**: an index over a column empty in
+every row is pure write cost for zero lookups.
+
+Top excluding agencies: HHS 69,978, OFAC 41,712, OPM 40,595, DOJ 3,220.
+
+All 168,452 records carry `recordStatus: Active`. Termination dates: 159,135
+absent (indefinite), 9,305 in the future, **12 in the past**. Year 2227 and 2105
+appear as indefinite placeholders, which is why SAM's `terminationDate` must not
+share a column with LEIE's `reinstate_date` — folding them together would make
+indefinitely excluded entities look reinstated.
+
+Stored rows: 162,547 after collapsing 5,905 duplicate identity hashes.
+
+### Partial indexes: the other half of the 0004 story
+
+Migration 0004 removed a partial index because SQLite ignored it. The missing
+half is that the QUERY has to carry the predicate. Verified directly:
+
+| query | plan |
+|---|---|
+| `WHERE npi = ?` | `SCAN t` |
+| `WHERE npi = ? AND npi <> ''` | `SEARCH t USING INDEX i_npi_partial (npi=?)` |
+| both forms inside `OR` | `MULTI-INDEX OR`, each disjunct on its index |
+
+So `src/match.ts` emits `(npi = ? AND npi <> '')` and the indexes are partial.
+This matters for write cost, not just reads: on the free plan every index entry
+is a separate row write, and a partial index writes nothing for a row that fails
+its predicate. Measured cost after the change: **5.15 row writes per inserted
+row** (1 table + ~4.15 index entries), against ~10 with full indexes.
+
+### The free-tier write ceiling is the real constraint
+
+D1 free plan: **5,000,000 rows read/day, 100,000 rows written/day**, and index
+updates each count as an additional written row.
+
+162,547 rows x 5.15 = ~837,000 writes, which is 8.4x the documented daily
+ceiling. The load was therefore built to be resumable across days
+(`source_load_progress`, and every response reports `coverage` so that a
+non-match against a partially loaded source is never presented as a clearance).
+
+In practice enforcement proved far looser than documented: the whole load went
+through in one session, and `rows_written_24h` reached **1,698,310** — 17x the
+stated limit — before writes began being refused. Reads behaved the same way
+earlier, succeeding well past 5,000,000 and then failing inconsistently across
+query shapes, so no proxy query is a reliable readiness probe. **Do not design
+against the documented numbers as if they were hard, and do not design against
+the observed slack as if it were guaranteed.**
+
+The consequence showed up immediately: once writes were refused, the request
+audit log silently lost every row, including for settled payments, because the
+insert failed inside an empty catch block. See `src/log.ts`.

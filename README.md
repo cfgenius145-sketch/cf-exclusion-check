@@ -1,8 +1,9 @@
 # CF Exclusion Check
 
 Pay-per-call screening against the **HHS-OIG List of Excluded Individuals and
-Entities (LEIE)**, on Cloudflare Workers. Charged per request with
-[x402](https://x402.org), and exposed to agents as an MCP tool.
+Entities (LEIE)** and the **SAM.gov exclusions list**, on Cloudflare Workers.
+Charged per request with [x402](https://x402.org), and exposed to agents as an
+MCP tool.
 
 Every result states *why* it matched. A screening answer that cannot be
 explained is worse than no answer, because someone may act on it.
@@ -18,6 +19,13 @@ explained is worse than no answer, because someone may act on it.
 |---|---|---|
 | `leie` | 83,975 | the LEIE active exclusions list |
 | `leie_rein` | 1,061 | 20 months of LEIE reinstatement supplements |
+| `sam` | 162,547 | the SAM.gov government-wide exclusions list |
+| **total** | **247,583** | |
+
+SAM.gov is government-wide rather than healthcare-specific, and it is **not**
+mostly businesses: 79.1% of its records are individuals, 15.2% are "Special
+Entity Designation", 4.9% firms and 0.8% vessels. The largest excluding agencies
+are HHS (69,978), OFAC (41,712) and OPM (40,595).
 
 The reinstatement supplements matter. `UPDATED.csv` holds **only currently
 excluded** subjects, so a reinstated person simply disappears from it and a bare
@@ -28,13 +36,13 @@ answers the more useful thing:
 
 ### What it does *not* screen
 
-- SAM.gov exclusions
 - state Medicaid exclusion lists
 - licensure board actions
 
-A match here is a **name match, not an identity determination**, and a non-match
-is not a clearance. Confirm against the official record at
-<https://exclusions.oig.hhs.gov> before acting against a person.
+A match here is a **name match, not an identity determination** (unless it was
+made on an identifier), and a non-match is not a clearance. Confirm against the
+official record at <https://exclusions.oig.hhs.gov> (LEIE) or
+<https://sam.gov/search> (SAM) before acting against a person or business.
 
 ---
 
@@ -54,7 +62,9 @@ is not a clearance. Confirm against the official record at
 | field | notes |
 |---|---|
 | `name` | `"John Smith"`, `"Smith, John"` or a business name. Wildcards rejected. |
-| `npi` | 10 digits. The strongest signal. |
+| `npi` | 10 digits. A strong identifier. |
+| `uei` | SAM Unique Entity Identifier, exactly 12 alphanumeric chars. Strong. |
+| `cage` | CAGE code, exactly 5 alphanumeric chars. Strong, but on only 0.3% of SAM rows. |
 | `dob` | `YYYYMMDD`. |
 | `state` | Two letters. **Corroborates only** — never creates or suppresses a match. |
 
@@ -67,14 +77,24 @@ is not a clearance. Confirm against the official record at
 | `reinstated_only` | matched, but every match has been reinstated |
 | `no_match` | nothing matched |
 
-`excluded` requires an *identifying* basis — an NPI, a full personal name, or a
-business name. A surname plus a first initial never produces it, **even when a
+`excluded` requires an *identifying* basis — an NPI, UEI or CAGE, a full
+personal name, or a business name. A surname plus a first initial never produces it, **even when a
 supplied state agrees**. Sharing a state with millions of people is
 corroboration, not identification, and "excluded" is a verdict someone can lose
 a job over.
 
-Each match also reports `basis`: `npi`, `business_name`, `full_name` or
-`surname_initial`.
+Each match also reports `basis`: `npi`, `uei`, `cage`, `business_name`,
+`full_name` or `surname_initial`.
+
+### Is the exclusion still in force?
+
+The two sources say "no longer excluded" differently, so neither answer is
+derived from the other. LEIE carries a **reinstatement date** — present means
+reinstated. SAM carries a **record status** and a **termination date**, the date
+the exclusion is scheduled to end; it is usually absent (indefinite) or far in
+the future, with year 2227 used as an indefinite placeholder. Of 168,452 SAM
+records only 12 have a termination date in the past. Anything not positively
+known to have ended is treated as still in force.
 
 ### Two counts, deliberately
 
@@ -151,9 +171,15 @@ on the free plan:
 
 | work | where |
 |---|---|
-| bulk generation (83,975 rows) | `scripts/build-seed.mjs` + `wrangler d1 execute` |
-| monthly supplements (41–200 rows) | Worker cron |
+| LEIE bulk generation (83,975 rows) | `scripts/build-seed.mjs` + `wrangler d1 execute` |
+| SAM bulk generation (162,547 rows) | `scripts/build-sam-seed.mjs` + `wrangler d1 execute` |
+| monthly LEIE supplements (41–200 rows) | Worker cron |
 | freshness of the bulk generation | Worker cron, `HEAD` only |
+
+SAM has the same problem for a different reason: its Exclusions API caps `size`
+at **10 records per page**, so 168,452 records would need ~16,846 requests
+against a published limit of 10–1,000 requests per day. Paging is not slow, it is
+impossible. The asynchronous extract returns the whole set in one download.
 
 Supplements add new exclusions and record reinstatements. They do **not** catch
 a record removed for any other reason — only a full reconcile does, and that
@@ -166,12 +192,13 @@ probe rather than implying the data is current.
 
 ```bash
 npm install
-npm test                       # 47 tests
+npm test                       # 71 tests, 17 of them executing real SQL
 npm run typecheck
 
 npm run migrate:local
 npm run seed:build             # downloads UPDATED.csv, emits seed/ parts
 node scripts/build-rein-seed.mjs
+node scripts/build-sam-seed.mjs   # needs .secrets/sam-exclusions.raw
 npx wrangler d1 execute cf_exclusions --local --file=seed/leie-seed.00.sql   # …and each part in order
 
 printf 'ADMIN_TOKEN=dev\nIP_HASH_SALT=dev\n' > .dev.vars

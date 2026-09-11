@@ -11,7 +11,22 @@
  *   - The query is hashed the same way, so repeat lookups can be counted and
  *     abuse spotted without the log becoming a list of who was screened.
  *
- * Writes go through waitUntil so logging never adds latency to a paid call.
+ * The write is AWAITED rather than deferred through waitUntil, and a failure is
+ * reported to the console rather than swallowed.
+ *
+ * Both changes came out of settled payments going unrecorded. The first
+ * explanation — that waitUntil was dropping the write once the payment path
+ * ended the invocation — was wrong. The actual cause was D1 refusing the insert:
+ *
+ *   D1_ERROR: Your account has exceeded D1's free tier daily row write limit.
+ *
+ * The SAM.gov bulk load had spent 1,327,771 row writes against a documented
+ * 100,000/day, so every subsequent insert failed. An empty catch block turned
+ * that into silence, and the audit log simply had no row for requests that had
+ * demonstrably been paid for. Awaiting the write does not fix a quota failure,
+ * but it keeps the audit row on the same footing as the response, and the
+ * console.error means the next such fault is visible in one tail rather than
+ * needing to be inferred from missing rows.
  */
 import type { Env } from "./env";
 
@@ -51,8 +66,9 @@ export async function writeLog(env: Env, e: LogEntry): Promise<void> {
       (e.ua ?? "").slice(0, 200) || null, queryHash,
       e.paid ? 1 : 0, e.price ?? null, e.txRef ?? null, e.status, e.ms,
     ).run();
-  } catch {
-    // A logging failure must never fail the caller's request. The Worker's
-    // observability logs still record the invocation.
+  } catch (e) {
+    // A logging failure must never fail the caller's request, but it must not
+    // be invisible either — an empty catch here is what hid the dropped writes.
+    console.error("request log write failed", String(e));
   }
 }

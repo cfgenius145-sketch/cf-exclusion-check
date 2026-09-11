@@ -19,9 +19,11 @@ import {
   candidateNamePairs,
   fullKey,
   normalizeBusiness,
+  normalizeCage,
   normalizeNpi,
   normalizeState,
   normalizeName,
+  normalizeUei,
 } from "./normalize";
 
 export type Confidence = "strong" | "match" | "weak" | "none";
@@ -36,6 +38,17 @@ export interface ExclusionRow {
   general: string | null;
   /** Optional: only /v1/report selects it, so fixtures may omit it. */
   upin?: string | null;
+  /** SAM.gov identifiers and metadata; absent on LEIE rows. */
+  uei?: string | null;
+  cage?: string | null;
+  duns?: string | null;
+  classification?: string | null;
+  program?: string | null;
+  agency_code?: string | null;
+  agency_name?: string | null;
+  record_status?: string | null;
+  termination_date?: string | null;
+  country?: string | null;
   specialty: string | null;
   npi: string | null;
   dob: string | null;
@@ -58,7 +71,8 @@ export interface ExclusionRow {
  * name, or a business name — can support a verdict of "excluded". A surname
  * plus a first initial cannot, however much other context agrees with it.
  */
-export type MatchBasis = "npi" | "business_name" | "full_name" | "surname_initial";
+export type MatchBasis =
+  | "npi" | "uei" | "cage" | "business_name" | "full_name" | "surname_initial";
 
 export interface MatchedRow {
   row: ExclusionRow;
@@ -72,6 +86,9 @@ export interface Query {
   npi?: string;
   dob?: string;
   state?: string;
+  /** SAM.gov organisation identifiers. */
+  uei?: string;
+  cage?: string;
 }
 
 const RANK: Record<Confidence, number> = { strong: 3, match: 2, weak: 1, none: 0 };
@@ -80,15 +97,23 @@ const RANK: Record<Confidence, number> = { strong: 3, match: 2, weak: 1, none: 0
 export function validateQuery(q: Query): { ok: true } | { ok: false; error: string } {
   const name = (q.name ?? "").trim();
   const npi = normalizeNpi(q.npi);
+  const uei = normalizeUei(q.uei);
+  const cage = normalizeCage(q.cage);
 
-  // Checked before the "nothing supplied" case: a caller who sent npi=12345
-  // did supply something, and telling them to supply an npi hides the actual
-  // problem with the one they sent.
+  // Malformed identifiers are reported before the "nothing supplied" case: a
+  // caller who sent npi=12345 did supply something, and telling them to supply
+  // an npi hides the actual problem with the one they sent.
   if (q.npi && !npi) {
     return { ok: false, error: "npi must be exactly 10 digits" };
   }
-  if (!name && !npi) {
-    return { ok: false, error: "provide name, or npi, or both" };
+  if (q.uei && !uei) {
+    return { ok: false, error: "uei must be exactly 12 alphanumeric characters" };
+  }
+  if (q.cage && !cage) {
+    return { ok: false, error: "cage must be exactly 5 alphanumeric characters" };
+  }
+  if (!name && !npi && !uei && !cage) {
+    return { ok: false, error: "provide name, npi, uei, or cage" };
   }
   if (name && /[*%_?]/.test(name)) {
     return { ok: false, error: "wildcards are not supported; supply a specific name" };
@@ -123,22 +148,40 @@ export function validateQuery(q: Query): { ok: true } | { ok: false; error: stri
 export function buildCandidateQuery(q: Query): { sql: string; params: string[] } {
   const cols = `id, source, last_name, first_name, mid_name, bus_name, general,
     specialty, upin, npi, dob, city, state, zip, excl_type, excl_date,
-    reinstate_date, waiver_date, waiver_state`;
+    reinstate_date, waiver_date, waiver_state, uei, cage, duns, classification,
+    program, agency_code, agency_name, record_status, termination_date,
+    country`;
 
   const terms: string[] = [];
   const params: string[] = [];
 
+  // Each identifier term carries its `<> ''` predicate explicitly. The columns
+  // are indexed by PARTIAL indexes, and SQLite only uses one when the query
+  // provably implies its predicate — a bare `npi = ?` with a bound parameter
+  // does not, and silently full-scans (that was the 0004 bug).
   const npi = normalizeNpi(q.npi);
   if (npi) {
-    terms.push("npi = ?");
+    terms.push("(npi = ? AND npi <> '')");
     params.push(npi);
+  }
+
+  const uei = normalizeUei(q.uei);
+  if (uei) {
+    terms.push("(uei = ? AND uei <> '')");
+    params.push(uei);
+  }
+
+  const cage = normalizeCage(q.cage);
+  if (cage) {
+    terms.push("(cage = ? AND cage <> '')");
+    params.push(cage);
   }
 
   const name = (q.name ?? "").trim();
   if (name) {
     const bus = normalizeBusiness(name);
     if (bus) {
-      terms.push("n_bus = ?");
+      terms.push("(n_bus = ? AND n_bus <> '')");
       params.push(bus);
     }
 
@@ -156,11 +199,11 @@ export function buildCandidateQuery(q: Query): { sql: string; params: string[] }
     const cappedLast = lastKeys.slice(0, 8);
 
     if (cappedFull.length) {
-      terms.push(`n_full IN (${cappedFull.map(() => "?").join(",")})`);
+      terms.push(`(n_full IN (${cappedFull.map(() => "?").join(",")}) AND n_full <> '')`);
       params.push(...cappedFull);
     }
     if (cappedLast.length) {
-      terms.push(`n_last IN (${cappedLast.map(() => "?").join(",")})`);
+      terms.push(`(n_last IN (${cappedLast.map(() => "?").join(",")}) AND n_last <> '')`);
       params.push(...cappedLast);
     }
   }
@@ -180,6 +223,8 @@ export function buildCandidateQuery(q: Query): { sql: string; params: string[] }
 /** Classify each candidate row against the query, discarding non-matches. */
 export function classify(rows: ExclusionRow[], q: Query): MatchedRow[] {
   const qNpi = normalizeNpi(q.npi);
+  const qUei = normalizeUei(q.uei);
+  const qCage = normalizeCage(q.cage);
   const qState = normalizeState(q.state);
   const name = (q.name ?? "").trim();
   const qBus = normalizeBusiness(name);
@@ -200,6 +245,26 @@ export function classify(rows: ExclusionRow[], q: Query): MatchedRow[] {
       best = "strong";
       basis = "npi";
       why = `npi equals ${rowNpi}`;
+    }
+
+    // UEI and CAGE are registry-assigned unique identifiers for an
+    // organisation, so an equality hit is as strong as an NPI hit is for a
+    // person. Checked before names, because an identifier beats a string.
+    if (RANK[best] < RANK.strong) {
+      const rowUei = normalizeUei(row.uei);
+      if (qUei && rowUei && qUei === rowUei) {
+        best = "strong";
+        basis = "uei";
+        why = `uei equals ${rowUei}`;
+      }
+    }
+    if (RANK[best] < RANK.strong) {
+      const rowCage = normalizeCage(row.cage);
+      if (qCage && rowCage && qCage === rowCage) {
+        best = "strong";
+        basis = "cage";
+        why = `cage equals ${rowCage}`;
+      }
     }
 
     if (RANK[best] < RANK.match && qBus && normalizeBusiness(row.bus_name) === qBus) {
@@ -265,8 +330,35 @@ export function overallConfidence(matches: MatchedRow[]): Confidence {
   return best;
 }
 
-/** A row is currently excluded when it has no reinstatement date. */
-export function isCurrentlyExcluded(row: ExclusionRow): boolean {
+/**
+ * Is this record an exclusion that is still in force?
+ *
+ * The two sources say "no longer excluded" in different ways, and neither
+ * answer can be derived from the other:
+ *
+ *   LEIE  carries a reinstatement date. Present => reinstated => not excluded.
+ *   SAM   carries a record status and a termination date. The termination date
+ *         is when the exclusion is scheduled to END, and is usually absent
+ *         (indefinite) or far in the future — year 2227 is used as an
+ *         indefinite placeholder. Of 168,452 records only 12 have a
+ *         termination date in the past.
+ *
+ * Anything not positively known to have ended is treated as still in force.
+ * Erring the other way would report an excluded party as clear.
+ */
+export function isCurrentlyExcluded(row: ExclusionRow, today?: string): boolean {
   const rein = (row.reinstate_date ?? "").replace(/\D/g, "");
-  return !(rein.length === 8 && rein !== "00000000");
+  if (rein.length === 8 && rein !== "00000000") return false;
+
+  // Absent on LEIE rows, so only SAM rows are affected by these two checks.
+  const status = (row.record_status ?? "").trim().toUpperCase();
+  if (status && status !== "ACTIVE") return false;
+
+  const term = (row.termination_date ?? "").replace(/\D/g, "");
+  if (term.length === 8 && term !== "00000000") {
+    const now = today ?? new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    if (term < now) return false;
+  }
+
+  return true;
 }

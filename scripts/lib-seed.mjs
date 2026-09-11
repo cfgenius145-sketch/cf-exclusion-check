@@ -129,11 +129,11 @@ export function rowToValues(r, { ix, source, loadId, loadedAt }) {
 }
 
 /** Wrap VALUES tuples into multi-row INSERT statements. */
-export function inserts(vals, rowsPerInsert) {
+export function inserts(vals, rowsPerInsert, cols = COLS) {
   const out = [];
   for (let i = 0; i < vals.length; i += rowsPerInsert) {
     out.push(
-      `INSERT OR REPLACE INTO exclusions (${COLS}) VALUES\n` +
+      `INSERT OR REPLACE INTO exclusions (${cols}) VALUES\n` +
       vals.slice(i, i + rowsPerInsert).join(",\n") + ";",
     );
   }
@@ -152,6 +152,7 @@ export function inserts(vals, rowsPerInsert) {
 export function writeParts({
   outDir, prefix, source, loadId, loadedAt, sha256, values,
   sourceLines, dupLines, skipped, rowsPerInsert, rowsPerPart, note,
+  cols = COLS,
 }) {
   mkdirSync(outDir, { recursive: true });
 
@@ -170,7 +171,7 @@ export function writeParts({
     const slice = values.slice(i, i + rowsPerPart);
     parts.push([
       `-- ${loadId} part ${String(n).padStart(2, "0")}: rows ${i + 1}-${i + slice.length}`,
-      ...inserts(slice, rowsPerInsert),
+      ...inserts(slice, rowsPerInsert, cols),
     ]);
   }
 

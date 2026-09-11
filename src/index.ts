@@ -12,7 +12,7 @@ import type { Env } from "./env";
 import { discoveryDocument } from "./discovery";
 import { validateQuery, type Query } from "./match";
 import { writeLog } from "./log";
-import { DISCLAIMER, screen, sourceInfo } from "./screen";
+import { DISCLAIMER, coverageOf, screen, sourceInfo } from "./screen";
 import { freshnessProbe, monthlySupplement } from "./loader";
 import { getPaymentMiddleware } from "./payment";
 import { checkRateLimit } from "./ratelimit";
@@ -58,7 +58,7 @@ app.use("*", async (c, next) => {
     : null;
 
   const q = c.get("screenQuery");
-  c.executionCtx.waitUntil(writeLog(c.env, {
+  await writeLog(c.env, {
     path,
     ip: c.req.header("cf-connecting-ip") ?? null,
     ua: c.req.header("user-agent") ?? null,
@@ -68,7 +68,7 @@ app.use("*", async (c, next) => {
     txRef: txRefFrom(c.res.headers.get("payment-response") ?? undefined),
     status: c.res.status,
     ms: Date.now() - started,
-  }));
+  });
 });
 
 /** True when the request presents an x402 payment header (v2 or v1). */
@@ -130,6 +130,8 @@ async function readQuery(c: any): Promise<Query> {
         npi: body?.npi != null ? String(body.npi) : undefined,
         dob: body?.dob != null ? String(body.dob) : undefined,
         state: typeof body?.state === "string" ? body.state : undefined,
+        uei: body?.uei != null ? String(body.uei) : undefined,
+        cage: body?.cage != null ? String(body.cage) : undefined,
       };
     } catch {
       return {};
@@ -137,7 +139,10 @@ async function readQuery(c: any): Promise<Query> {
   }
   const u = new URL(c.req.url);
   const g = (k: string) => u.searchParams.get(k) ?? undefined;
-  return { name: g("name"), npi: g("npi"), dob: g("dob"), state: g("state") };
+  return {
+    name: g("name"), npi: g("npi"), dob: g("dob"), state: g("state"),
+    uei: g("uei"), cage: g("cage"),
+  };
 }
 
 async function handleScreen(c: any, detail: "brief" | "full") {
@@ -149,7 +154,9 @@ async function handleScreen(c: any, detail: "brief" | "full") {
   }
 
   // Hashed for the request log; the raw name is never logged.
-  c.set("screenQuery", `${q.name ?? ""}|${q.npi ?? ""}|${q.dob ?? ""}|${q.state ?? ""}`);
+  c.set("screenQuery",
+    `${q.name ?? ""}|${q.npi ?? ""}|${q.dob ?? ""}|${q.state ?? ""}` +
+    `|${q.uei ?? ""}|${q.cage ?? ""}`);
 
   const [result, sources] = await Promise.all([
     screen(c.env, q, detail),
@@ -160,6 +167,7 @@ async function handleScreen(c: any, detail: "brief" | "full") {
     query: {
       name: q.name ?? null, npi: q.npi ?? null,
       dob: q.dob ?? null, state: q.state ?? null,
+      uei: q.uei ?? null, cage: q.cage ?? null,
     },
     verdict: result.verdict,
     confidence: result.confidence,
@@ -171,6 +179,10 @@ async function handleScreen(c: any, detail: "brief" | "full") {
     truncated: result.truncated,
     matches: result.matches,
     sources,
+    // Surfaced on every screening response, not just /v1/health: a caller
+    // acting on a non-match needs to know whether the sources were complete
+    // when the answer was produced.
+    coverage: coverageOf(sources),
     disclaimer: DISCLAIMER,
     checked_at: new Date().toISOString(),
   });
@@ -189,6 +201,7 @@ app.get("/v1/health", async (c) => {
   ).first<{ n_rows: number; logged_requests: number }>();
 
   const reseedDue = sources.some((s) => s.reseed_due);
+  const coverage = coverageOf(sources);
 
   return c.json({
     service: c.env.SERVICE_NAME,
@@ -196,6 +209,7 @@ app.get("/v1/health", async (c) => {
     rows: totals?.n_rows ?? 0,
     logged_requests: totals?.logged_requests ?? 0,
     sources,
+    coverage,
     // Stated rather than implied. The free plan cannot re-download a 15.6MB
     // source list in-Worker, so freshness is asserted only as far as the
     // freshness probe can prove it.

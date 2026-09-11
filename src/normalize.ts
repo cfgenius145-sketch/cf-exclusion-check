@@ -110,3 +110,29 @@ export function candidateNamePairs(query: string): Array<{ last: string; first: 
     arr.findIndex((q) => q.last === p.last && q.first === p.first) === i,
   );
 }
+
+/**
+ * SAM.gov Unique Entity Identifier: exactly 12 alphanumeric characters.
+ *
+ * Validated on shape rather than accepted as given, so a caller sending a CAGE
+ * code or a truncated identifier in the uei field gets nothing rather than a
+ * silent non-match they might read as a clearance.
+ */
+export function normalizeUei(input: string | null | undefined): string {
+  const s = (input ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return s.length === 12 ? s : "";
+}
+
+/** CAGE code: exactly 5 alphanumeric characters. */
+export function normalizeCage(input: string | null | undefined): string {
+  const s = (input ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return s.length === 5 ? s : "";
+}
+
+/** SAM dates arrive as MM-DD-YYYY; LEIE columns are YYYYMMDD. */
+export function normalizeSamDate(input: string | null | undefined): string {
+  const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec((input ?? "").trim());
+  if (!m) return normalizeDate(input);
+  return `${m[3]}${m[1]}${m[2]}`;
+}
+
