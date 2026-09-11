@@ -259,6 +259,25 @@ individual parts fail transiently and succeed on retry. `wrangler d1 import`
 does not exist in wrangler 4.131.0, and `migrations apply --remote` needs
 `CI=true` to run unattended.
 
+## Verifying mainnet end to end
+
+```bash
+./scripts/verify-mainnet.sh          # one attempt; exits 2 if not ready
+./scripts/verify-mainnet.sh --wait   # poll until ready, then verify
+```
+
+It makes one real paid call, then checks the on-chain receipt at `PAY_TO`, the
+`paid=1` audit row and its transaction reference, and whether the Bazaar has
+indexed the resource.
+
+**It will not spend money unless the service is demonstrably serving.** The gate
+is four consecutive full health checks plus one more immediately before paying,
+because under D1 quota pressure the service answers intermittently and every
+cheaper readiness proxy tried here reported ready while a screening still
+failed: `SELECT 1` succeeds at zero rows read, a one-row read succeeds while a
+larger query fails, and a single `/v1/health` 200 was followed immediately by a
+503. A run during an outage costs nothing and reports `NOT READY`.
+
 ## Deploying
 
 ```bash
