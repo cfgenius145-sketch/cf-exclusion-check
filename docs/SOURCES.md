@@ -536,3 +536,84 @@ the observed slack as if it were guaranteed.**
 The consequence showed up immediately: once writes were refused, the request
 audit log silently lost every row, including for settled payments, because the
 insert failed inside an empty catch block. See `src/log.ts`.
+
+---
+
+## CDP facilitator and mainnet, verified 2026-09-11
+
+### The public facilitator does not support mainnet
+
+`GET https://x402.org/facilitator/supported` (no auth) returns only testnets:
+`eip155:84532`, `base-sepolia`, `solana-devnet`, `hedera:testnet`,
+`stellar:testnet`, `xrpl:1`, `aptos:2`, an Algorand devnet. **No
+`eip155:8453`.** So mainnet is not a one-var flip; it requires the CDP
+facilitator.
+
+`GET https://api.cdp.coinbase.com/platform/v2/x402/supported` **requires auth**
+(401 without) and returns `exact`, `upto`, `batch-settlement` on `eip155:8453`,
+`eip155:137`, `eip155:42161`, `eip155:480`, `eip155:4801`, `eip155:84532`, plus
+Solana. `GET .../x402/discovery/resources` needs **no** auth.
+
+### CDP key format and JWT
+
+The API key secret is base64 of **64 bytes** = 32-byte Ed25519 seed + 32-byte
+public key. WebCrypto imports Ed25519 private keys only as PKCS8, so the seed is
+wrapped in the fixed RFC 8410 prefix `302e020100300506032b657004220420`. The
+`uris` claim binds a token to one method and path, so one token is minted per
+facilitator endpoint, and `createAuthHeaders` must return headers **keyed by
+path** — a flat headers object throws rather than silently dropping auth.
+
+Base mainnet USDC verified on-chain: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`,
+chainId 8453, `USD Coin`, symbol `USDC`, 6 decimals. So `$0.01` = `10000` atomic.
+
+### Payment flows
+
+The `exact` EVM scheme reports, per asset-transfer method:
+
+```
+eip3009:  supported ["authorization","upfront"]  default "authorization"
+permit2:  supported ["authorization","upfront"]  default "authorization"
+```
+
+and `resolvePaymentFlowPhases`:
+
+| flow | verifyBeforeHandler | settleBeforeHandler | settleAfterHandler |
+|---|---|---|---|
+| `authorization` | true | **false** | true |
+| `upfront` | false | **true** | false |
+| `escrow` | false | true | true |
+
+So `authorization` — the default — settles only after a successful handler, and a
+failed request cannot charge. `extra.paymentFlow` is pinned explicitly anyway, so
+a change in the library default cannot quietly start billing for failures.
+
+### The per-request full table scan
+
+The worst cost bug in this project, and it was invisible until the read budget
+disappeared.
+
+`sourceInfo()` ran `SELECT source, COUNT(*) FROM exclusions GROUP BY source` to
+report provenance. Plan: `SCAN e USING COVERING INDEX idx_excl_load` — a pass
+over every row. It ran on **every screening request and every health check**, so
+at 247,583 rows each call spent ~247,000 of D1's 5,000,000 daily row reads,
+capping the service near **20 requests per day**. It also made `/v1/health`
+return 500 once the budget was gone — the one endpoint a caller uses to tell an
+outage from a bad query.
+
+Counts now come from `source_load_progress`, which already stores them: three
+rows instead of a quarter of a million. `test/sql.test.ts` asserts that neither
+`sourceInfo` nor `/v1/health` mentions the `exclusions` table.
+
+**Rule: never count rows at request time.** An aggregate with no WHERE clause is
+a full scan however well the table is indexed, and a covering index makes it
+cheaper per row without making it bounded.
+
+### Read-quota enforcement is not uniform
+
+Under an exhausted read budget, `SELECT 1` succeeds at 0 rows read while
+`SELECT id FROM exclusions LIMIT 1` fails. A readiness probe that does not touch
+a row cannot detect the condition — the same vacuous-probe trap as a database
+ping that passes with the wrong password. Enforcement also fluctuates: a one-row
+probe can pass while a larger query in the same request fails, so `/v1/health`
+and the screening path both catch their own query failures and degrade to 503
+rather than throwing a 500.

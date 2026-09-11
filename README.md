@@ -9,7 +9,9 @@ Every result states *why* it matched. A screening answer that cannot be
 explained is worse than no answer, because someone may act on it.
 
 **Live:** `https://cf-exclusion-check.cf-exclusion-check.workers.dev`
-**Network:** Base Sepolia testnet (`eip155:84532`) — not yet on mainnet.
+**Network:** Base mainnet (`eip155:8453`) via the Coinbase CDP facilitator.
+Payments are real. Settlement is after-handler, so a request that cannot be
+served is not charged.
 
 ---
 
@@ -195,7 +197,7 @@ two of them bite in ways the documentation does not prepare you for.
 
 | limit | documented | what actually happened |
 |---|---|---|
-| D1 rows read | 5,000,000 / day | exceeded, then refused **inconsistently across query shapes** |
+| D1 rows read | 5,000,000 / day | exceeded, then refused **inconsistently across query shapes** — a one-row probe can succeed while a larger query fails |
 | D1 rows written | 100,000 / day | reached **1,698,310** before writes were refused |
 | D1 database size | 500 MB | currently 110 MB at 247,583 rows |
 | Worker CPU | 10 ms / invocation, cron included | hard; it is why bulk loading cannot run in-Worker |
@@ -222,6 +224,16 @@ Two consequences seen in practice:
 A bulk reload spends roughly **5.15 row writes per row** (one table write plus
 ~4.15 partial-index entries), so reloading SAM costs ~837,000 writes. Schedule
 reloads accordingly, and expect the audit log to degrade while one is running.
+
+**Never count rows at request time.** The sharpest lesson here: a single
+`SELECT source, COUNT(*) FROM exclusions GROUP BY source` in the provenance
+lookup ran on every screening request and every health check. Its plan is
+`SCAN ... USING COVERING INDEX` — a pass over all 247,583 rows — so each call
+spent ~247k of the daily read budget and capped the service near **20 requests a
+day**. Row counts now come from `source_load_progress`, which already tracks
+them. `test/sql.test.ts` asserts that neither the provenance lookup nor
+`/v1/health` references the `exclusions` table, because this is an easy mistake
+to reintroduce and its cost is invisible until the budget is gone.
 
 ## Local development
 

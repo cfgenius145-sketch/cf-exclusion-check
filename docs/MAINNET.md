@@ -1,168 +1,100 @@
-# Going to mainnet
+# Mainnet
 
-Everything here is verified. Nothing in this file has been applied — the service
-is still on Base Sepolia testnet, because three things are required that the
-operator must supply.
+**Live on Base mainnet (`eip155:8453`).** Payments are real USDC.
 
-## Why it is not already done
+| setting | value |
+|---|---|
+| network | `eip155:8453` |
+| `PAY_TO` | `0xCa28eb92657F8a81aFb5493b3a04A740B204d816` |
+| facilitator | `https://api.cdp.coinbase.com/platform/v2/x402` |
+| asset | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` (USD Coin, 6 decimals, verified on-chain) |
+| payment flow | `authorization` — settle **after** the handler succeeds |
 
-### 1. No receiving address was supplied
+## The three things that made this non-trivial
 
-The instruction read `PAY_TO = [YOUR COINBASE BASE USDC ADDRESS]` — a literal
-placeholder. On mainnet `payTo` is where real USDC lands. An address that is
-wrong, or that nobody holds the keys to, loses every payment irreversibly. It is
-not a value to guess, infer, or substitute.
+### The public facilitator is testnet-only
 
-### 2. The configured facilitator does not support mainnet
+`https://x402.org/facilitator` does not support mainnet. Its `/supported`
+endpoint returns `eip155:84532`, `base-sepolia`, `solana-devnet`,
+`hedera:testnet`, `stellar:testnet`, `xrpl:1`, `aptos:2` and an Algorand
+devnet — **no `eip155:8453`**. Pointing `FACILITATOR_URL` back at it makes every
+paid request fail with `Facilitator does not support exact on eip155:8453`.
 
-`https://x402.org/facilitator` is testnet-only. Its `/supported` endpoint,
-queried live:
+The CDP facilitator does support it: `exact`, `upto` and `batch-settlement` on
+`eip155:8453`, plus Polygon, Arbitrum, World Chain and Solana.
 
-```
-algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe   exact
-aptos:2                                     exact
-base-sepolia                                exact
-eip155:84532                                batch-settlement, exact, upto
-hedera:testnet                              exact
-solana-devnet                               exact
-stellar:testnet                             exact
-xrpl:1                                      exact
-```
+### CDP auth is a signed JWT per request
 
-**`eip155:8453` is absent.** Changing `NETWORK` while leaving this facilitator in
-place makes every paid request fail with
-`Facilitator does not support exact on eip155:8453` — the same failure mode seen
-in Phase A when `initialize()` was skipped. Mainnet needs Coinbase's CDP
-facilitator, which requires a CDP API key and secret.
+`/supported` requires auth (401 without it), while `/discovery/resources` does
+not. Implemented in `src/cdp.ts`:
 
-### 3. The testnet balance cannot become mainnet funds
+- The secret is base64 of **64 bytes**: a 32-byte Ed25519 seed followed by the
+  32-byte public key.
+- WebCrypto imports an Ed25519 private key only as **PKCS8**, so the seed is
+  wrapped in the fixed RFC 8410 prefix
+  (`302e020100300506032b657004220420`). No Node-only crypto API is used, because
+  this has to run inside a Worker.
+- Header `{ alg: "EdDSA", kid, typ: "JWT", nonce }`; payload
+  `{ sub, iss: "cdp", aud: [host], nbf, exp, uris: ["<METHOD> <host><path>"] }`.
+- `uris` pins a token to one method and path, so a **separate token is minted
+  per endpoint**.
+- `createAuthHeaders` must return headers **keyed by path**
+  (`verify`/`settle`/`supported`/`bazaar`). Returning a flat
+  `{ Authorization }` object throws — by design, since it would otherwise
+  silently drop auth on every request.
 
-Base Sepolia USDC is test script with no value and **no bridge to mainnet**. The
-19.94 test USDC held by the payer key can never fund a real payment. A mainnet
-`$0.01` check requires real USDC bought or transferred on Base mainnet.
+### Settlement order is what makes failures safe
 
-## What is already correct
+`extra.paymentFlow` selects the flow. `authorization` resolves to
+`verifyBeforeHandler: true, settleBeforeHandler: false, settleAfterHandler:
+true` — the payment is verified up front and settled only after the handler
+returns successfully, so a 5xx or 503 costs the caller nothing. It is already
+the default for `exact`/`eip3009`, and it is pinned explicitly anyway: the
+alternative, `upfront`, settles before the handler, so a change in the library
+default would start charging for failed requests with nothing flagging it.
 
-- The Base mainnet USDC contract in `src/discovery.ts` is verified on-chain:
-  `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, chainId **8453**, `USD Coin`,
-  symbol `USDC`, **6 decimals**. So `$0.01` → `10000` atomic is right.
-- Prices, network and `payTo` are all read from config, so the flip is a config
-  change with no code change.
+Confirmed empirically on testnet: when a screening query failed with a 500
+during an index bug, the payer's balance did not move.
 
-## Exact steps
+## Reverting to testnet
 
-### Step 1 — get a Base mainnet USDC address you control
+`NETWORK` → `eip155:84532`. CDP supports both, so the facilitator and
+credentials stay as they are. `scripts/x402-client.mjs` reads the network from
+the discovery document and switches payer keys automatically.
 
-In the Coinbase app or on coinbase.com:
+## Keys
 
-1. **Search for USDC** and open the asset page.
-2. **Receive** → choose **USDC**.
-3. **Set the network to `Base`.** This is the step that matters. Coinbase
-   defaults to Ethereum for USDC; an Ethereum-network address will not receive
-   Base payments, and funds sent to the wrong network may be unrecoverable.
-4. Copy the `0x…` address. That is `PAY_TO`.
+| file | role | note |
+|---|---|---|
+| `.secrets/mainnet-payer.json` | spends, for verification calls | holds **real** funds; keep a few cents only |
+| `.secrets/testnet-payer.json` | spends, testnet | valueless |
+| `.secrets/testnet-payto.json` | old testnet receiver | superseded by the Coinbase address |
 
-A self-custody wallet (Coinbase Wallet, Rainbow, Foundry-generated key) works
-equally well — the only requirement is that you hold the keys and the address is
-on Base.
+`PAY_TO` is a var rather than a secret: a receiving address is public by nature
+— it is published in every 402 challenge — and keeping it in config makes a
+change of payout destination reviewable in a diff instead of invisible in a
+secret store.
 
-> Do not reuse `0x3416DD0D9182cd5D806Ac21112dd24f87e1E84ac`. That is the
-> testnet key minted by `scripts/gen-testnet-key.mjs`; its private key sits in
-> `.secrets/` on a workstation, which is not where a revenue address belongs.
+## Bazaar indexing
 
-### Step 2 — get CDP facilitator credentials
+Indexing is not a submission form. Verified against the live discovery API
+(<https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources>, no key
+required): it returns real `eip155:8453` resources.
 
-1. Sign in at <https://portal.cdp.coinbase.com>.
-2. Create an API key (key id + secret).
-3. Set them as Worker secrets:
+Three conditions must hold:
 
-```bash
-npx wrangler secret put CDP_API_KEY_ID
-npx wrangler secret put CDP_API_KEY_SECRET
-```
-
-`src/payment.ts` builds its `HTTPFacilitatorClient` from `FACILITATOR_URL`; the
-CDP facilitator additionally needs auth headers, which is a small code change to
-pass `createAuthHeaders` into the client. That change is not made here because it
-cannot be tested without the credentials.
-
-### Step 3 — flip the config
-
-In `wrangler.jsonc`:
-
-```jsonc
-"NETWORK": "eip155:8453",
-"PAY_TO":  "0xYOUR_BASE_ADDRESS",
-"FACILITATOR_URL": "https://api.cdp.coinbase.com/platform/v2/x402",
-```
-
-Then `npx wrangler deploy`.
-
-### Step 4 — verify before taking money
-
-```bash
-curl -s https://cf-exclusion-check.cf-exclusion-check.workers.dev/v1/health \
-  | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['network'],d['payment_configured'])"
-```
-
-Expect `eip155:8453 True`. Then confirm the 402 challenge advertises mainnet:
-
-```bash
-curl -s -D - -o /dev/null \
-  "https://cf-exclusion-check.cf-exclusion-check.workers.dev/v1/check?name=Test" \
-  | grep -i payment-required
-```
-
-Decode it and check `network` is `eip155:8453`, `asset` is
-`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, and `payTo` is **your** address.
-Verify `payTo` character by character before any payment is made.
-
-### Step 5 — one real $0.01 check
-
-Fund a payer wallet with a small amount of USDC **on Base**, put its key in
-`.secrets/mainnet-payer.json`, and run:
-
-```bash
-node scripts/x402-client.mjs /v1/check "USA Remediation Services, Inc"
-```
-
-Confirm receipt on-chain rather than trusting the response:
-
-```bash
-node -e "
-const {createPublicClient,http,formatUnits}=require('viem');
-const abi=[{name:'balanceOf',type:'function',stateMutability:'view',
-  inputs:[{name:'a',type:'address'}],outputs:[{type:'uint256'}]}];
-(async()=>{const c=createPublicClient({transport:http('https://mainnet.base.org')});
-console.log(formatUnits(await c.readContract({
-  address:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',abi,
-  functionName:'balanceOf',args:['0xYOUR_BASE_ADDRESS']}),6),'USDC');})();"
-```
-
-## Bazaar / x402scan indexing
-
-Indexing is **not** a submission form. Verified against the live discovery API
-(<https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources>, which needs
-no API key): it returns real mainnet resources on `eip155:8453`, and this service
-is absent from it.
-
-Three conditions have to hold before it appears:
-
-1. **Payments run through the CDP facilitator.** The Bazaar is populated by the
-   CDP facilitator as it settles payments. A resource paid through
-   `x402.org/facilitator` is never seen by it, regardless of what the discovery
+1. Payments settle through the **CDP facilitator** — a resource paid via
+   `x402.org/facilitator` is never seen by the catalog, whatever its discovery
    document says.
-2. **The route declares the bazaar extension** with `discoverable: true`.
-3. **At least one real payment settles** on that route. Indexing happens on first
-   paid hit; a `$0.01` call is enough.
+2. The route declares the bazaar extension. Done: `routesFor()` in
+   `src/payment.ts` attaches `declareDiscoveryExtension(...)` to each paid route,
+   and `bazaarResourceServerExtension` is registered on the resource server. The
+   live 402 carries `extensions: ["bazaar"]`.
+3. **At least one real payment settles.** The catalog indexes on first paid hit.
 
-So the ordering is forced: address → CDP credentials → mainnet flip → one paid
-call → indexing. There is nothing to submit and nothing to wait on beyond that
-first settled payment.
-
-Check for the listing afterwards with:
+Check with:
 
 ```bash
 curl -s "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources?limit=100" \
-  | grep -o "cf-exclusion-check" | head -1
+  | grep -o "cf-exclusion-check"
 ```
