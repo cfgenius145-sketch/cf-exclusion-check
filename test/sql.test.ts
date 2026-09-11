@@ -22,6 +22,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildCandidateQuery, classify, type ExclusionRow } from "../src/match";
+import { readFileSync as readSrc } from "node:fs";
 
 let db: DatabaseSync;
 
@@ -205,3 +206,35 @@ describe("SAM exclusion currency, end to end", () => {
     expect(row.termination_date).toBe("20200101");
   });
 });
+
+describe("provenance lookups never scan the exclusions table", () => {
+  it("sourceInfo reads the bookkeeping tables only", () => {
+    // Regression: sourceInfo used to run
+    //   SELECT source, COUNT(*) FROM exclusions GROUP BY source
+    // whose plan is SCAN ... USING COVERING INDEX — a pass over every row. It
+    // runs on every screening request and every health check, so at 247,583
+    // rows it spent ~247k of D1's 5,000,000 daily reads PER CALL and capped the
+    // service at roughly 20 requests a day.
+    const src = readSrc("src/screen.ts", "utf8");
+    const fn = src.slice(src.indexOf("export async function sourceInfo"));
+    const body = fn.slice(0, fn.indexOf("\n}"));
+    expect(body).not.toMatch(/FROM\s+exclusions/i);
+    expect(body).toContain("source_load_progress");
+  });
+
+  it("health does not COUNT(*) the exclusions table", () => {
+    const src = readSrc("src/index.ts", "utf8");
+    expect(src).not.toMatch(/COUNT\(\*\)\s*FROM\s+exclusions/i);
+  });
+
+  it("the bookkeeping query plan touches no large table", () => {
+    const details = db.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT p.source, p.rows_done, p.rows_expected, p.status
+         FROM source_load_progress p ORDER BY p.source`,
+    ).all() as any[];
+    const joined = details.map((d) => String(d.detail)).join(" ");
+    expect(joined).not.toContain("exclusions");
+  });
+});
+

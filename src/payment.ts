@@ -21,7 +21,12 @@
 import { paymentMiddleware } from "@x402/hono";
 import { HTTPFacilitatorClient, x402ResourceServer } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
+import {
+  bazaarResourceServerExtension,
+  declareDiscoveryExtension,
+} from "@x402/extensions/bazaar";
 import type { MiddlewareHandler } from "hono";
+import { cdpAuthHeaders } from "./cdp";
 import type { Env } from "./env";
 
 let cached: { key: string; handler: MiddlewareHandler } | null = null;
@@ -61,7 +66,57 @@ function routesFor(env: Env, payTo: string) {
     payTo,
     scheme: "exact",
     maxTimeoutSeconds: 60,
+    // Settle AFTER the handler succeeds, so a request that cannot be served is
+    // never charged for.
+    //
+    // This is already the default for exact/eip3009 — the scheme reports
+    // paymentFlows.eip3009 = { supported: ["authorization","upfront"],
+    // default: "authorization" }, and resolvePaymentFlowPhases("authorization")
+    // gives { verifyBeforeHandler: true, settleBeforeHandler: false,
+    // settleAfterHandler: true }. Confirmed empirically too: when a screening
+    // query failed with a 500 during an index bug, the payer's balance did not
+    // move.
+    //
+    // It is pinned explicitly anyway. The alternative, "upfront", settles before
+    // the handler runs, so if the library default ever changed, every failed
+    // request would start taking money and nothing here would flag it.
+    extra: { paymentFlow: "authorization" },
   };
+
+  // Bazaar discovery. The CDP facilitator catalogs a resource when it settles a
+  // payment on a route that declares this extension, so the declaration is what
+  // makes the service discoverable — there is no submission form. Indexing
+  // happens on the first paid hit.
+  // `method` is deliberately not declared: bazaarResourceServerExtension fills
+  // it in from the route during enrichment. Query and body forms are declared
+  // separately because the body form additionally requires bodyType.
+  const QUERY_INPUT = {
+    name: "string", npi: "string", uei: "string", cage: "string", state: "string",
+  };
+  const CHECK_OUTPUT = {
+    example: {
+      verdict: "excluded",
+      confidence: "match",
+      basis: "business_name",
+      match_count: 2,
+      subject_count: 1,
+    },
+  };
+
+  const checkDiscoveryGet = declareDiscoveryExtension({
+    input: QUERY_INPUT, output: CHECK_OUTPUT,
+  });
+  const checkDiscoveryPost = declareDiscoveryExtension({
+    bodyType: "json", input: QUERY_INPUT, output: CHECK_OUTPUT,
+  });
+  const reportDiscoveryGet = declareDiscoveryExtension({
+    input: QUERY_INPUT,
+    output: { example: { verdict: "excluded", matches: [{ record: {} }] } },
+  });
+  const reportDiscoveryPost = declareDiscoveryExtension({
+    bodyType: "json", input: QUERY_INPUT,
+    output: { example: { verdict: "excluded", matches: [{ record: {} }] } },
+  });
 
   const check = {
     accepts: { ...common, price: env.PRICE_CHECK },
@@ -105,10 +160,10 @@ function routesFor(env: Env, payTo: string) {
   // Both HTTP methods are registered because both are served; leaving GET
   // unpriced would be a trivially exploitable bypass of the paid POST.
   return {
-    "POST /v1/check": check,
-    "GET /v1/check": check,
-    "POST /v1/report": report,
-    "GET /v1/report": report,
+    "POST /v1/check": { ...check, extensions: checkDiscoveryPost },
+    "GET /v1/check": { ...check, extensions: checkDiscoveryGet },
+    "POST /v1/report": { ...report, extensions: reportDiscoveryPost },
+    "GET /v1/report": { ...report, extensions: reportDiscoveryGet },
     "POST /mcp": mcp,
   };
 }
@@ -140,9 +195,19 @@ export function getPaymentMiddleware(env: Env): MiddlewareHandler | null {
                env.FACILITATOR_URL].join("|");
 
   if (cached?.key !== key) {
-    const facilitator = new HTTPFacilitatorClient({ url: env.FACILITATOR_URL });
+    // CDP credentials, when present, authenticate every facilitator call. The
+    // header factory is path-keyed because @x402/core rejects a flat headers
+    // object rather than silently dropping auth. Without credentials the client
+    // is unauthenticated, which is correct for the public testnet facilitator.
+    const facilitator = new HTTPFacilitatorClient({
+      url: env.FACILITATOR_URL,
+      createAuthHeaders: cdpAuthHeaders(
+        env.FACILITATOR_URL, env.CDP_API_KEY_ID, env.CDP_API_KEY_SECRET,
+      ),
+    });
     const server = new x402ResourceServer(facilitator)
-      .register(env.NETWORK as never, new ExactEvmScheme());
+      .register(env.NETWORK as never, new ExactEvmScheme())
+      .registerExtension(bazaarResourceServerExtension);
 
     const inner = paymentMiddleware(
       routesFor(env, payTo) as never,

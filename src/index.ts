@@ -105,17 +105,55 @@ app.use("*", async (c, next) => {
 });
 
 /**
+ * Can the data layer actually serve a screening right now?
+ *
+ * Checked BEFORE payment, because the alternative is charging for a request
+ * that then fails — the caller pays and gets nothing. That is not hypothetical:
+ * a bulk load exhausted D1's daily row-read budget and every screening query
+ * began returning
+ *   D1_ERROR: Your account has exceeded D1's free tier daily row read limit
+ * while the paywall happily kept taking payments.
+ *
+ * The probe reads ONE row. `SELECT 1` is useless here — it succeeds at zero
+ * rows read even while the quota is refusing real reads, verified directly. Any
+ * readiness probe that does not touch a row is a probe that cannot fail.
+ */
+async function dataLayerReady(env: Env): Promise<boolean> {
+  try {
+    await env.DB.prepare("SELECT id FROM exclusions LIMIT 1").first();
+    return true;
+  } catch (e) {
+    console.error("data layer unavailable", String(e));
+    return false;
+  }
+}
+
+/** 503 body for a request refused before any payment was taken. */
+const unavailable = {
+  error: "service temporarily unavailable",
+  reason:
+    "The exclusion data layer is not currently readable, so a screening " +
+    "cannot be answered. No payment was requested or taken for this request.",
+  retry: "See /v1/health. Quota-based outages clear at 00:00 UTC.",
+};
+
+/**
  * Payment gate.
  *
  * Applied only to the paid paths, and only when PAY_TO is configured. Mounted
  * as a wrapper rather than via app.use on a path so that the middleware can be
  * built from `env`, which is not available at module scope in Workers.
+ *
+ * Readiness is checked first, and a failure short-circuits to 503 WITHOUT
+ * invoking the payment middleware, so an unservable request is never charged.
  */
 app.use("/v1/check", async (c, next) => {
+  if (!(await dataLayerReady(c.env))) return c.json(unavailable, 503);
   const mw = getPaymentMiddleware(c.env);
   return mw ? mw(c, next) : next();
 });
 app.use("/v1/report", async (c, next) => {
+  if (!(await dataLayerReady(c.env))) return c.json(unavailable, 503);
   const mw = getPaymentMiddleware(c.env);
   return mw ? mw(c, next) : next();
 });
@@ -158,10 +196,19 @@ async function handleScreen(c: any, detail: "brief" | "full") {
     `${q.name ?? ""}|${q.npi ?? ""}|${q.dob ?? ""}|${q.state ?? ""}` +
     `|${q.uei ?? ""}|${q.cage ?? ""}`);
 
-  const [result, sources] = await Promise.all([
-    screen(c.env, q, detail),
-    sourceInfo(c.env),
-  ]);
+  let result, sources;
+  try {
+    [result, sources] = await Promise.all([
+      screen(c.env, q, detail),
+      sourceInfo(c.env),
+    ]);
+  } catch (e) {
+    // Returning a non-2xx matters for more than tidiness: the payment flow is
+    // `authorization`, which settles only AFTER a successful handler, so
+    // failing here means the caller is not charged.
+    console.error("screen failed", String(e));
+    return c.json(unavailable, 503);
+  }
 
   return c.json({
     query: {
@@ -194,20 +241,52 @@ app.post("/v1/report", (c) => handleScreen(c, "full"));
 app.get("/v1/report", (c) => handleScreen(c, "full"));
 
 app.get("/v1/health", async (c) => {
-  const sources = await sourceInfo(c.env);
-  const totals = await c.env.DB.prepare(
-    `SELECT (SELECT COUNT(*) FROM exclusions) AS n_rows,
-            (SELECT COUNT(*) FROM requests)   AS logged_requests`,
-  ).first<{ n_rows: number; logged_requests: number }>();
+  // Health must answer even when the data layer cannot, otherwise the one
+  // endpoint a caller uses to distinguish an outage from a bad query is the
+  // endpoint that 500s during an outage.
+  if (!(await dataLayerReady(c.env))) {
+    return c.json({
+      service: c.env.SERVICE_NAME,
+      status: "degraded",
+      reason: unavailable.reason,
+      retry: unavailable.retry,
+      payment_configured: Boolean(c.env.PAY_TO),
+      network: c.env.NETWORK,
+      prices: { "/v1/check": c.env.PRICE_CHECK, "/v1/report": c.env.PRICE_REPORT },
+      now: new Date().toISOString(),
+    }, 503);
+  }
 
+  let sources;
+  try {
+    sources = await sourceInfo(c.env);
+  } catch (e) {
+    // Degrade rather than 500. The readiness probe above reads a single row,
+    // which D1 can allow while refusing a larger query, so health must also
+    // survive its own query failing.
+    console.error("health: sourceInfo failed", String(e));
+    return c.json({
+      service: c.env.SERVICE_NAME,
+      status: "degraded",
+      reason: unavailable.reason,
+      retry: unavailable.retry,
+      payment_configured: Boolean(c.env.PAY_TO),
+      network: c.env.NETWORK,
+      now: new Date().toISOString(),
+    }, 503);
+  }
+
+  // Row totals are summed from the per-source bookkeeping, never counted in
+  // `exclusions`. A COUNT(*) over the table reads all 247,583 rows and, running
+  // on every health check, is what drained D1's daily read budget.
+  const totalRows = sources.reduce((n, s) => n + s.rows, 0);
   const reseedDue = sources.some((s) => s.reseed_due);
   const coverage = coverageOf(sources);
 
   return c.json({
     service: c.env.SERVICE_NAME,
-    status: totals && totals.n_rows > 0 ? "ok" : "no_data",
-    rows: totals?.n_rows ?? 0,
-    logged_requests: totals?.logged_requests ?? 0,
+    status: totalRows > 0 ? "ok" : "no_data",
+    rows: totalRows,
     sources,
     coverage,
     // Stated rather than implied. The free plan cannot re-download a 15.6MB
@@ -273,6 +352,13 @@ app.use("/mcp", async (c, next) => {
   const tool = typeof params.name === "string" ? params.name : "";
 
   if (!PAID_METHODS.has(method) || tool !== PAID_TOOL) return next();
+
+  if (!(await dataLayerReady(c.env))) {
+    return c.json({
+      jsonrpc: "2.0", id: body.id ?? null,
+      error: { code: -32000, message: unavailable.reason },
+    }, 503);
+  }
 
   const mw = getPaymentMiddleware(c.env);
   return mw ? mw(c, next) : next();

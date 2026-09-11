@@ -15,6 +15,8 @@ export interface Env {
   ADMIN_TOKEN?: string;       // guards POST /admin/*
   IP_HASH_SALT?: string;      // salt for request-log IP hashing
   SAM_API_KEY?: string;       // optional SAM.gov exclusions source
+  CDP_API_KEY_ID?: string;    // Coinbase CDP facilitator (mainnet settlement)
+  CDP_API_KEY_SECRET?: string;
 }
 
 /** Monthly LEIE supplements, e.g. .../downloadables/2026/2608rein.csv */

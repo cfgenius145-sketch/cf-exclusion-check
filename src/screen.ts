@@ -151,41 +151,45 @@ function fullRecord(row: ExclusionRow) {
   };
 }
 
-/** Read per-source provenance so an answer can state what it screened. */
+/**
+ * Read per-source provenance so an answer can state what it screened.
+ *
+ * Reads the tiny bookkeeping tables ONLY. It must never count rows in
+ * `exclusions`.
+ *
+ * The previous version did `SELECT source, COUNT(*) ... FROM exclusions GROUP BY
+ * source`, whose plan is `SCAN e USING COVERING INDEX idx_excl_load` — a pass
+ * over every row in the table. Because this runs on every screening request and
+ * every health check, at 247,583 rows it spent ~247k of D1's 5,000,000 daily
+ * row reads PER CALL, capping the whole service at roughly 20 requests a day.
+ * That is what exhausted the read budget and made /v1/health return 500.
+ *
+ * `source_load_progress` already holds the authoritative row count per source
+ * (it is what tracks load completeness), so the count is read from there: three
+ * rows instead of a quarter of a million.
+ */
 export async function sourceInfo(env: Env): Promise<SourceInfo[]> {
-  // One query, not one per source: the free plan allows 50 D1 queries per
-  // invocation and a paid call should spend as few as possible.
-  //
-  // Correlated subqueries rather than MAX() over a join, because MAX(loaded_at)
-  // and MAX(sha256) can come from different `loads` rows and would report a
-  // digest that never belonged to that load. The digest is taken from the most
-  // recent load that HAS one: the cron supplement writes no digest (it merges a
-  // small file rather than replacing a generation), so the reported digest stays
-  // the one identifying the bulk generation actually in the table.
   const { results } = await env.DB.prepare(
-    `SELECT e.source AS source,
-            COUNT(*) AS n_rows,
+    `SELECT p.source                                          AS source,
+            p.rows_done                                       AS n_rows,
+            p.rows_expected                                   AS rows_expected,
+            p.status                                          AS load_status,
             (SELECT l.loaded_at FROM loads l
-               WHERE l.source = e.source
-               ORDER BY l.loaded_at DESC LIMIT 1)              AS loaded_at,
+               WHERE l.source = p.source
+               ORDER BY l.loaded_at DESC LIMIT 1)             AS loaded_at,
             (SELECT l.sha256 FROM loads l
-               WHERE l.source = e.source AND l.sha256 IS NOT NULL
-               ORDER BY l.loaded_at DESC LIMIT 1)              AS sha256,
+               WHERE l.source = p.source AND l.sha256 IS NOT NULL
+               ORDER BY l.loaded_at DESC LIMIT 1)             AS sha256,
             (SELECT s.reseed_due FROM source_state s
-               WHERE s.source = e.source)                     AS reseed_due,
+               WHERE s.source = p.source)                     AS reseed_due,
             (SELECT s.upstream_last_modified FROM source_state s
-               WHERE s.source = e.source)                     AS upstream_last_modified,
-            (SELECT p.status FROM source_load_progress p
-               WHERE p.source = e.source)                     AS load_status,
-            (SELECT p.rows_expected FROM source_load_progress p
-               WHERE p.source = e.source)                     AS rows_expected
-       FROM exclusions e
-      GROUP BY e.source
-      ORDER BY e.source`,
+               WHERE s.source = p.source)                     AS upstream_last_modified
+       FROM source_load_progress p
+      ORDER BY p.source`,
   ).all<{
-    source: string; n_rows: number; loaded_at: string | null; sha256: string | null;
+    source: string; n_rows: number; rows_expected: number | null;
+    load_status: string | null; loaded_at: string | null; sha256: string | null;
     reseed_due: number | null; upstream_last_modified: string | null;
-    load_status: string | null; rows_expected: number | null;
   }>();
 
   return (results ?? []).map((r) => ({
@@ -195,8 +199,6 @@ export async function sourceInfo(env: Env): Promise<SourceInfo[]> {
     sha256: r.sha256,
     reseed_due: Boolean(r.reseed_due),
     upstream_last_modified: r.upstream_last_modified,
-    // No progress row means the source was loaded in one pass and is complete;
-    // only an explicit 'partial' marks it incomplete.
     complete: r.load_status !== "partial",
     rows_expected: r.rows_expected,
   }));
