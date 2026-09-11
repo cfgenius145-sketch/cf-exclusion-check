@@ -188,6 +188,41 @@ probe rather than implying the data is current.
 
 `docs/SOURCES.md` records every measurement behind these claims.
 
+### Free-tier caveats
+
+This runs on the Cloudflare free plan deliberately. Four limits shape it, and
+two of them bite in ways the documentation does not prepare you for.
+
+| limit | documented | what actually happened |
+|---|---|---|
+| D1 rows read | 5,000,000 / day | exceeded, then refused **inconsistently across query shapes** |
+| D1 rows written | 100,000 / day | reached **1,698,310** before writes were refused |
+| D1 database size | 500 MB | currently 110 MB at 247,583 rows |
+| Worker CPU | 10 ms / invocation, cron included | hard; it is why bulk loading cannot run in-Worker |
+
+**Bulk reloads are local-only, by design.** Every bulk generation is built on a
+workstation with `scripts/build-*-seed.mjs` and applied with
+`wrangler d1 execute`. Nothing reloads a full source from inside the Worker. The
+cron only merges the small monthly LEIE supplements and runs a `HEAD` freshness
+probe.
+
+**Do not design against either number as if it were hard.** The documented
+ceilings are not enforced strictly, and the observed slack is not a guarantee.
+Two consequences seen in practice:
+
+- A single full-table scan per request (one missing index) burned the daily read
+  budget after roughly 59 paid calls, and surfaced as a `500` on a request whose
+  payment had already been authorised — the caller pays and gets nothing. Hence
+  the index discipline in `migrations/0004` and `0005`, and the query-plan
+  assertions in `test/sql.test.ts`.
+- When the write budget ran out, request-log inserts began failing. They had been
+  wrapped in an empty `catch`, so settled payments silently went unlogged. The
+  write is now awaited and failures are surfaced.
+
+A bulk reload spends roughly **5.15 row writes per row** (one table write plus
+~4.15 partial-index entries), so reloading SAM costs ~837,000 writes. Schedule
+reloads accordingly, and expect the audit log to degrade while one is running.
+
 ## Local development
 
 ```bash
@@ -221,14 +256,14 @@ npx wrangler deploy
 
 ### Going to mainnet
 
-Change exactly two vars in `wrangler.jsonc`:
+See **[docs/MAINNET.md](docs/MAINNET.md)** for the verified procedure. In short,
+it is not a two-line change: the configured facilitator
+(`https://x402.org/facilitator`) is **testnet-only** — its `/supported` endpoint
+does not list `eip155:8453` — so mainnet also requires Coinbase CDP facilitator
+credentials. Flipping `NETWORK` alone makes every paid request fail.
 
-```jsonc
-"NETWORK": "eip155:8453",
-"PAY_TO":  "0x…"          // from a wallet you control
-```
-
-Mainnet USDC is already mapped in `src/discovery.ts`. No code change.
+The Base mainnet USDC contract is already mapped and verified on-chain
+(`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, chainId 8453, 6 decimals).
 
 **The current `PAY_TO` is a testnet-only key** minted by
 `scripts/gen-testnet-key.mjs`, with its private key in `.secrets/` (gitignored).
