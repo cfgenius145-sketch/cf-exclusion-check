@@ -617,3 +617,53 @@ ping that passes with the wrong password. Enforcement also fluctuates: a one-row
 probe can pass while a larger query in the same request fails, so `/v1/health`
 and the screening path both catch their own query failures and degrade to 503
 rather than throwing a 500.
+
+---
+
+## Bazaar indexing, verified 2026-09-11 (mainnet)
+
+Indexing happened automatically on the **first settled payment**. No submission,
+no approval step. The paid call settled at `17:40:49.867Z` and the indexed
+record's `quality.lastCalledAt` is exactly `2026-09-11T17:40:49.867Z`.
+
+### Check with the merchant endpoint, not the general listing
+
+| endpoint | result for this service |
+|---|---|
+| `GET /v2/x402/discovery/merchant?payTo=<addr>` | **found**, `total: 1` |
+| `GET /v2/x402/discovery/resources` (1,200 scanned) | **not present** |
+| `GET /v2/x402/discovery/search?query=...` | present, but ranked 3/5, 7/10, absent on one query |
+
+The general listing is the wrong tool for "is my resource indexed" — a resource
+can be indexed and still not appear in it. `discovery/merchant` filtered by
+`payTo` is the authoritative check.
+
+Two pagination traps on the way to that answer:
+
+- The listing uses **offset** pagination (`offset=`), not a cursor. An initial
+  check read `limit=100` and looked for a `pagination.cursor` to continue; none
+  came, so it reported "not indexed" after seeing 1% of the catalog. That
+  conclusion was wrong.
+- `${VAR,,}` in the checking script is bash 4+ and macOS ships bash 3.2, so it
+  raised `bad substitution`; a `2>/dev/null` on the surrounding `$(...)`
+  swallowed the error and left the result empty rather than failing loudly.
+  Lowercase in Python, and never silence the comparison you are relying on.
+
+### What is actually indexed
+
+Only the route that was **paid**: `/v1/check`. `/v1/report` and `/mcp` carry the
+same bazaar declaration but are absent until each takes its own first payment.
+
+### The description is the product listing
+
+The indexed record stores the route's `description` and `tags` from
+`routesFor()` — not the discovery document's. Those had been left at their
+original wording, mentioning only the OIG LEIE and no identifiers, while the
+service had since gained SAM.gov, UEI and CAGE. The ranking showed it: 3rd of 5
+for "healthcare exclusion screening" and **absent** for "check if a provider is
+excluded from medicare".
+
+Route descriptions and tags are now written for retrieval — both sources, the
+record count, every accepted identifier, and the phrases a buyer would actually
+search. **The indexed copy refreshes on the next settled payment**, so a
+metadata change is not live in the catalog until one more call is paid for.

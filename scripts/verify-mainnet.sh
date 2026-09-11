@@ -16,8 +16,12 @@
 # so the gate is N consecutive full health checks, and it re-checks immediately
 # before paying.
 #
-#   ./scripts/verify-mainnet.sh            # one attempt, exits 2 if not ready
-#   ./scripts/verify-mainnet.sh --wait     # poll until ready, then verify
+#   ./scripts/verify-mainnet.sh                # one attempt, exits 2 if not ready
+#   ./scripts/verify-mainnet.sh --wait         # poll until ready, then verify
+#   ./scripts/verify-mainnet.sh --bazaar-only  # Bazaar lookup only; never pays
+#
+#   BASE_URL=https://cf-package-check.cf-exclusion-check.workers.dev \
+#     ./scripts/verify-mainnet.sh --bazaar-only   # same lookup for booth #2
 #
 set -uo pipefail
 
@@ -27,7 +31,9 @@ PAYER_KEYFILE=".secrets/mainnet-payer.json"
 USDC="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 NEEDED_OK=4
 WAIT=0
+BAZAAR_ONLY=0
 [ "${1:-}" = "--wait" ] && WAIT=1
+[ "${1:-}" = "--bazaar-only" ] && BAZAAR_ONLY=1
 
 bal () {
   node -e "
@@ -50,8 +56,72 @@ d=json.load(sys.stdin)
 raise SystemExit(0 if d.get('status')=='ok' and d.get('rows',0)>0 else 1)" 2>/dev/null
 }
 
+# Bazaar lookup. Two bugs lived here:
+#   1. Lowercasing. ${VAR,,} is bash 4+ and macOS ships bash 3.2, where it is a
+#      "bad substitution". The 2>/dev/null that used to be here swallowed that
+#      error and left $hit empty, so the check silently reported nothing instead
+#      of failing loudly. Lowercasing now happens in Python, with the values
+#      passed as arguments rather than interpolated into code.
+#   2. Paging. It fetched one page (?limit=100) of a catalog that held 14,280
+#      resources on 2026-09-11, so even a listed service would almost never be
+#      on it and the answer was "no" regardless. The whole catalog is now paged.
+# YES requires a catalog resource URL on THIS host. PAYTO is shared with
+# booth #2, so a match on the payout address alone proves nothing about this
+# booth: those resources are reported separately, never as YES. (The first
+# version of this fix counted them, and reported booth #2 listed on the
+# strength of booth #1's entry.)
+bazaar_check () {
+  local attempts="$1" attempt hit
+  for attempt in $(seq 1 "$attempts"); do
+    hit=$(python3 - "$PAYTO" "${BASE#https://}" <<'PYEOF'
+import json, sys, urllib.request
+payto, host = sys.argv[1].lower(), sys.argv[2].lower().rstrip("/")
+url = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources"
+offset, total, own, same_payto = 0, None, [], []
+try:
+    while total is None or offset < total:
+        req = urllib.request.Request(f"{url}?limit=1000&offset={offset}",
+                                     headers={"user-agent": "cf-verify-mainnet/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            page = json.load(r)
+        items = page.get("items", [])
+        total = page.get("pagination", {}).get("total", 0)
+        for it in items:
+            resource = it.get("resource") or ""
+            if f"//{host}/" in resource.lower() or resource.lower().endswith(f"//{host}"):
+                own.append(resource)
+            elif payto in json.dumps(it).lower():
+                same_payto.append(resource or "?")
+        if not items:
+            break
+        offset += len(items)
+except Exception as e:
+    print(f"ERROR ({type(e).__name__}: {e})")
+    raise SystemExit(0)
+line = ("YES" if own else "no") + f" (scanned {offset} of {total})"
+if own:
+    line += ": " + ", ".join(own[:10])
+if same_payto:
+    line += " | same payTo, other host: " + ", ".join(same_payto[:5])
+print(line)
+PYEOF
+)
+    echo "  attempt $attempt: listed=$hit"
+    [ "${hit%% *}" = "YES" ] && return 0
+    [ "$attempt" -lt "$attempts" ] && sleep 120
+  done
+  return 1
+}
+
 echo "=== mainnet verification $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
 echo "  target: $BASE"
+
+if [ "$BAZAAR_ONLY" = "1" ]; then
+  echo
+  echo "--- Bazaar only (no health gate, no payment) ---"
+  bazaar_check 1
+  exit $?
+fi
 
 streak=0
 attempts=$([ "$WAIT" = "1" ] && echo 400 || echo "$NEEDED_OK")
@@ -144,15 +214,6 @@ except Exception:
 
 echo
 echo "--- Bazaar (indexes on first paid hit; may lag) ---"
-for attempt in 1 2 3 4 5; do
-  curl -s -m 25 "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources?limit=100" -o /tmp/bz_check.json
-  hit=$(python3 -c "
-import json
-b=json.dumps(json.load(open('/tmp/bz_check.json'))).lower()
-print('YES' if 'cf-exclusion-check' in b or '${PAYTO,,}' in b else 'no')" 2>/dev/null)
-  echo "  attempt $attempt: listed=$hit"
-  [ "$hit" = "YES" ] && break
-  [ "$attempt" -lt 5 ] && sleep 120
-done
+bazaar_check 5
 
 echo "=== done $(date -u '+%H:%M:%SZ') (client rc=$RC) ==="
