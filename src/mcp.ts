@@ -76,6 +76,9 @@ function toolDefinitions(env: Env) {
         },
         additionalProperties: false,
       },
+      // A screening lookup reads the loaded exclusion data and nothing else:
+      // no writes, no side effects, safe to call speculatively.
+      annotations: { readOnlyHint: true },
     },
     {
       name: "exclusion_sources",
@@ -85,6 +88,7 @@ function toolDefinitions(env: Env) {
         "counts, load dates, load completeness and whether a bulk reseed is " +
         "due. Free.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true },
     },
   ];
 }

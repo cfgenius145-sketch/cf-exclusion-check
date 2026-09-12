@@ -136,8 +136,8 @@ eventually drops one whose bare URL stops answering `402 Payment Required`. So:
 
 - Settle at least one paid call per listed route inside every 30-day window;
   run `./scripts/verify-mainnet.sh` (one $0.05 `/v1/check`) at least every
-  three weeks. `/v1/report` is not listed and will not be until a $0.50 report
-  call settles.
+  three weeks. `/v1/report` is also listed as of a settlement on 2026-09-11 —
+  keep both routes alive, not just `/v1/check`.
 - Check the listing without paying:
 
 ```bash
@@ -317,10 +317,12 @@ credentials. Flipping `NETWORK` alone makes every paid request fail.
 The Base mainnet USDC contract is already mapped and verified on-chain
 (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, chainId 8453, 6 decimals).
 
-**The current `PAY_TO` is a testnet-only key** minted by
-`scripts/gen-testnet-key.mjs`, with its private key in `.secrets/` (gitignored).
-Never reuse it on mainnet — a payout address should come from a wallet you
-control, not from a build script.
+**`PAY_TO` is a real mainnet receiving address**, not a build-script key — see
+[docs/MAINNET.md](docs/MAINNET.md) for how and why it was rotated. Payments
+settle in real USDC. The testnet-only key that `scripts/gen-testnet-key.mjs`
+mints is still used for `.secrets/testnet-payer.json`, which *spends* on
+testnet; it was never the receiving address and should not be confused with
+`PAY_TO`.
 
 ## Privacy
 

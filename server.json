@@ -1,0 +1,12 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.cfgenius145-sketch/cf-exclusion-check",
+  "description": "Pay-per-call screening against HHS-OIG LEIE and SAM.gov exclusions.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://cf-exclusion-check.cf-exclusion-check.workers.dev/mcp"
+    }
+  ]
+}

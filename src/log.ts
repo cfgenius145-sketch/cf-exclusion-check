@@ -30,7 +30,8 @@
  */
 import type { Env } from "./env";
 
-async function hmacHex(salt: string, value: string): Promise<string> {
+// Exported so trial.ts hashes IPs with the exact same scheme as the audit log.
+export async function hmacHex(salt: string, value: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw", new TextEncoder().encode(salt),
     { name: "HMAC", hash: "SHA-256" }, false, ["sign"],

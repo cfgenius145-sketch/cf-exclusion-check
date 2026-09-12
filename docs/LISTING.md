@@ -70,7 +70,7 @@ generation has fallen behind the upstream file.
 | MCP `exclusion_check` | $0.05 per call |
 | MCP `exclusion_sources` | free |
 
-Paid in USDC over x402. Currently on **Base Sepolia testnet**.
+Paid in USDC over x402 on **Base mainnet**.
 
 ### For agents
 

@@ -10,12 +10,15 @@
 import { Hono } from "hono";
 import type { Env } from "./env";
 import { discoveryDocument } from "./discovery";
+import { openApiDocument } from "./openapi";
+import { landingPage } from "./landing";
 import { validateQuery, type Query } from "./match";
 import { writeLog } from "./log";
 import { DISCLAIMER, coverageOf, screen, sourceInfo } from "./screen";
 import { freshnessProbe, monthlySupplement } from "./loader";
 import { getPaymentMiddleware } from "./payment";
 import { checkRateLimit } from "./ratelimit";
+import { grantTrial, wantsTrial } from "./trial";
 import { PAID_METHODS, PAID_TOOL, handleMcp } from "./mcp";
 
 type Vars = { screenQuery?: string };
@@ -86,7 +89,7 @@ function hasPaymentHeader(c: { req: { header(n: string): string | undefined } })
  */
 app.use("*", async (c, next) => {
   const path = new URL(c.req.url).pathname;
-  if (path === "/v1/health" || path.startsWith("/.well-known/")) return next();
+  if (path === "/v1/health" || path === "/openapi.json" || path.startsWith("/.well-known/")) return next();
 
   const decision = await checkRateLimit(
     c.env, c.req.header("cf-connecting-ip") ?? null, hasPaymentHeader(c),
@@ -149,6 +152,27 @@ const unavailable = {
  */
 app.use("/v1/check", async (c, next) => {
   if (!(await dataLayerReady(c.env))) return c.json(unavailable, 503);
+
+  // Free trial. Only when unpaid, explicitly requested, and well-formed — see
+  // trial.ts. Anything else (no opt-in, malformed query, quota exhausted, no
+  // salt configured) falls straight through to the paywall below unchanged,
+  // so a bare probe still gets exactly the 402 it always has.
+  if (!hasPaymentHeader(c) && wantsTrial(c) && c.env.IP_HASH_SALT) {
+    const q = await readQuery(c);
+    const check = validateQuery(q);
+    if (check.ok) {
+      const ip = c.req.header("cf-connecting-ip") ?? null;
+      const trial = await grantTrial(c.env, ip);
+      if (trial.granted) {
+        c.set("screenQuery",
+          `${q.name ?? ""}|${q.npi ?? ""}|${q.dob ?? ""}|${q.state ?? ""}` +
+          `|${q.uei ?? ""}|${q.cage ?? ""}`);
+        c.header("X-Trial-Remaining", String(trial.remaining));
+        return handleScreen(c, "brief");
+      }
+    }
+  }
+
   const mw = getPaymentMiddleware(c.env);
   return mw ? mw(c, next) : next();
 });
@@ -315,6 +339,12 @@ const discovery = (c: any) => {
 app.get("/.well-known/x402", discovery);
 app.get("/.well-known/x402.json", discovery);
 
+// x402scan treats OpenAPI as the canonical discovery format; see openapi.ts.
+app.get("/openapi.json", (c) => {
+  const u = new URL(c.req.url);
+  return c.json(openApiDocument(c.env, `${u.protocol}//${u.host}`) as never);
+});
+
 /** Admin: run the cron work on demand. Guarded by ADMIN_TOKEN. */
 app.post("/admin/reload", async (c) => {
   const expected = c.env.ADMIN_TOKEN;
@@ -393,13 +423,24 @@ app.get("/mcp", (c) => c.json({
   free_tools: ["exclusion_sources"],
 }));
 
-app.get("/", (c) => c.json({
-  service: c.env.SERVICE_NAME,
-  discovery: "/.well-known/x402",
-  health: "/v1/health",
-  mcp: "/mcp",
-  endpoints: ["/v1/check", "/v1/report", "/v1/health", "/mcp"],
-}));
+// A browser navigating here gets the human landing page; anything that isn't
+// asking for HTML (curl's default Accept: */*, or an explicit application/json)
+// keeps getting the original small JSON index, so nothing that already
+// depends on GET / returning JSON breaks.
+app.get("/", (c) => {
+  const accept = c.req.header("accept") ?? "";
+  if (accept.includes("text/html")) {
+    const u = new URL(c.req.url);
+    return c.html(landingPage(c.env, `${u.protocol}//${u.host}`));
+  }
+  return c.json({
+    service: c.env.SERVICE_NAME,
+    discovery: "/.well-known/x402",
+    health: "/v1/health",
+    mcp: "/mcp",
+    endpoints: ["/v1/check", "/v1/report", "/v1/health", "/mcp"],
+  });
+});
 
 app.notFound((c) => c.json({ error: "not found", see: "/.well-known/x402" }, 404));
 
