@@ -8,7 +8,7 @@ MCP tool.
 Every result states *why* it matched. A screening answer that cannot be
 explained is worse than no answer, because someone may act on it.
 
-**Live:** `https://cf-exclusion-check.cf-exclusion-check.workers.dev`
+**Live:** `https://exclusions.cfsoft.us`
 **Network:** Base mainnet (`eip155:8453`) via the Coinbase CDP facilitator.
 Payments are real. Settlement is after-handler, so a request that cannot be
 served is not charged.

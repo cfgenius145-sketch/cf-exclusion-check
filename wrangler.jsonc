@@ -6,6 +6,19 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
 
+  // cfsoft.us zone is active on Cloudflare's own nameservers, so this is a
+  // native Workers Custom Domain rather than the droplet reverse-proxy plan
+  // in docs/DOMAIN-MOVE.md (written for cfaisolutions.com, which had no zone
+  // here). The workers.dev route stays live alongside this one.
+  // workers_dev stays on: Bazaar's indexed resource URLs and any in-flight
+  // caller still point at the workers.dev origin, so adding the custom domain
+  // must not silently kill it (wrangler disables workers_dev by default the
+  // moment a route is added).
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "exclusions.cfsoft.us", "custom_domain": true }
+  ],
+
   // Rate limiting via the native binding rather than counting rows in D1.
   // Counting in D1 would cost a query on every request and, because request
   // logging is deferred through waitUntil, the count would lag behind reality

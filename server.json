@@ -6,7 +6,7 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://cf-exclusion-check.cf-exclusion-check.workers.dev/mcp"
+      "url": "https://exclusions.cfsoft.us/mcp"
     }
   ]
 }
