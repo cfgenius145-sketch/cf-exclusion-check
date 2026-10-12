@@ -54,10 +54,89 @@ official record at <https://exclusions.oig.hhs.gov> (LEIE) or
 |---|---|---|
 | `POST\|GET /v1/check` | **$0.05** | verdict, confidence, basis, reason per match |
 | `POST\|GET /v1/report` | **$0.50** | every match with full source fields |
+| `POST /v1/batch` | **$0.30 / $1.00 / $3.00** | 2-200 items in one call, tiered by count — see below |
 | `GET /v1/health` | free | row counts, load dates, freshness |
 | `GET /.well-known/x402` | free | discovery document (also at `…/x402.json`) |
-| `POST /mcp` | $0.05 per paid tool call | JSON-RPC; discovery is free |
+| `POST /mcp` | $0.05, or tiered for batch | JSON-RPC; discovery is free |
 | `POST /admin/reload` | — | `ADMIN_TOKEN` required |
+
+### Batch screening
+
+`POST /v1/batch` screens 2-200 items in one paid call — a clinic's 80-person
+staff roster is one call, not 80. Each item accepts the same fields as
+`/v1/check` (`name`, `npi`, `dob`, `state`, `uei`, `cage`), plus an optional
+`ref` that is round-tripped verbatim so you can join results back to your own
+records:
+
+```bash
+curl -X POST "$BASE/v1/batch" -H 'content-type: application/json' -d '{
+  "items": [
+    {"ref": "staff-1", "name": "Smith, John", "state": "TX"},
+    {"ref": "staff-2", "npi": "1477537496"}
+  ]
+}'
+```
+
+Priced once per call, from the item count:
+
+| items | price |
+|---|---|
+| 2-10 | $0.30 |
+| 11-50 | $1.00 |
+| 51-200 | $3.00 |
+
+The price is resolved from your real item count at request time (x402's
+`DynamicPrice`), not a static value — the `payment-required` header on an
+unpaid call always carries the exact amount for what you sent.
+
+An invalid item (bad NPI, no identifying field, etc.) does not fail the whole
+batch: it comes back as an error object in that item's place, in the same
+input order, and **is still billed** — only a batch where *every* item is
+invalid is rejected with 400 and no charge. Outside 2-200 items is also a 400
+before any payment is requested.
+
+Response shape — one entry per input item, same verdict/confidence/basis
+vocabulary as `/v1/check`:
+
+```json
+{
+  "billed_items": 2,
+  "tier": "small",
+  "price": "$0.30",
+  "as_of": "2026-09-12T08:49:38.766Z",
+  "results": [
+    {
+      "ref": "staff-1",
+      "query": { "name": "Smith, John", "state": "TX", "npi": null, "dob": null, "uei": null, "cage": null },
+      "verdict": "no_match",
+      "confidence": "none",
+      "basis": null,
+      "match_count": 0,
+      "subject_count": 0,
+      "truncated": false,
+      "matches": []
+    },
+    {
+      "ref": "staff-2",
+      "query": { "npi": "1477537496", "name": null, "state": null, "dob": null, "uei": null, "cage": null },
+      "verdict": "excluded",
+      "confidence": "strong",
+      "basis": "npi",
+      "match_count": 1,
+      "subject_count": 1,
+      "truncated": false,
+      "matches": [ { "confidence": "strong", "basis": "npi", "record": { "...": "..." } } ]
+    }
+  ]
+}
+```
+
+One set of D1 lookups covers the whole batch — every item's candidate
+identifiers are pooled into a handful of chunked queries (never one query per
+item, never more than 100 bound parameters each), then matched in memory with
+the same `classify()` logic `/v1/check` uses. Measured worst case (200 items,
+zero identifier overlap): 14 D1 queries, ~122ms end to end. `/v1/batch` has its
+own rate-limit bucket — see **Rate limits** below.
 
 ### Query fields
 
@@ -107,6 +186,56 @@ three separate exclusions.
 
 ---
 
+## v2 envelope (shared across every CF Soft booth)
+
+Add `?v=2` to `/v1/check`, `/v1/report`, or `/v1/batch` for the CF Soft
+envelope — the same top-level response shape every CF Soft booth uses, so a
+developer who has integrated one has effectively integrated all of them. The
+full spec is [docs/ENVELOPE.md](docs/ENVELOPE.md); the short version:
+
+```bash
+curl "$BASE/v1/check?name=Smith,%20John&state=TX&v=2"
+```
+
+```json
+{
+  "service": "exclusion-check",
+  "version": "2",
+  "query": { "name": "Smith, John", "npi": null, "dob": null, "state": "TX", "uei": null, "cage": null },
+  "verdict": "excluded",
+  "confidence": "match",
+  "basis": "full_name",
+  "counts": { "records": 1, "subjects": 1 },
+  "records": [ { "confidence": "match", "basis": "full_name", "matched_on": "...", "record": { "...": "..." } } ],
+  "sources": [ { "name": "leie", "as_of": "2026-09-10T21:21:05.202Z", "url": "https://exclusions.oig.hhs.gov", "rows": 83975, "...": "..." } ],
+  "limits": [
+    "Screens the HHS-OIG LEIE and SAM.gov exclusions. It does not screen state Medicaid exclusion lists or licensure board actions.",
+    "A match is a name match, not an identity determination. ...",
+    "state corroborates a match; it does not identify or exclude one"
+  ],
+  "as_of": "2026-09-10T21:21:05.202Z",
+  "truncated": false
+}
+```
+
+Without `?v=2`, every response is byte-for-byte what it always was —
+`match_count`, `subject_count`, `matches`, `disclaimer`, `coverage`, all of
+it, unchanged. `verdict` keeps this booth's own four words
+(`excluded`/`possible_match`/`reinstated_only`/`no_match`) in v2 too — the
+envelope standardizes the *shape* every booth returns, not the vocabulary
+each one uses for `verdict`, which stays booth-specific by design.
+
+`/v1/batch`'s v2 shape hoists `service`/`sources`/`limits`/`as_of` once at
+the top (they don't vary per item) and gives each entry in `results[]` its
+own `verdict`/`confidence`/`basis`/`counts`/`records`; `billed_items`/`tier`/
+`price` are unchanged payment bookkeeping, present in both shapes.
+
+MCP: `exclusion_check` and `exclusion_batch_check`'s `structuredContent`
+gain an `envelope` key carrying this same shape, nested alongside the
+existing v1 fields rather than replacing them.
+
+---
+
 ## Paying
 
 An unpaid call returns **402** with the machine-readable challenge in the
@@ -124,6 +253,11 @@ An unpaid call returns **402** with the machine-readable challenge in the
 ```bash
 node scripts/x402-client.mjs               # /v1/check
 node scripts/x402-client.mjs /v1/report "Some Name"
+
+# POST routes with a JSON body (e.g. /v1/batch) — set BODY_JSON instead of
+# relying on the default ?name= query string:
+BODY_JSON='{"items":[{"name":"Smith, John"},{"npi":"1477537496"}]}' \
+  node scripts/x402-client.mjs /v1/batch
 ```
 
 Gas is paid by the facilitator under EIP-3009, so a payer needs USDC only.
@@ -138,6 +272,13 @@ eventually drops one whose bare URL stops answering `402 Payment Required`. So:
   run `./scripts/verify-mainnet.sh` (one $0.05 `/v1/check`) at least every
   three weeks. `/v1/report` is also listed as of a settlement on 2026-09-11 —
   keep both routes alive, not just `/v1/check`.
+- `/v1/batch` indexes on **its own** first settled payment against the
+  production URL, same as every other route (see the CDP-facilitator-and-Bazaar
+  section of `docs/SOURCES.md`). The G2 verification payment for this feature
+  ran against a 0%-traffic preview URL, which is a different resource from
+  Bazaar's point of view — `/v1/batch` will not appear listed until one real
+  paid call settles against `exclusions.cfsoft.us` itself, e.g.
+  `BODY_JSON='{"items":[{"name":"Smith, John"},{"npi":"1477537496"}]}' node scripts/x402-client.mjs /v1/batch`.
 - Check the listing without paying:
 
 ```bash
@@ -158,6 +299,7 @@ curl -X POST $BASE/mcp -H 'content-type: application/json' \
 | tool | price |
 |---|---|
 | `exclusion_check` | $0.05 per call |
+| `exclusion_batch_check` | $0.30 / $1.00 / $3.00, tiered by item count (2-200) |
 | `exclusion_sources` | free |
 
 `initialize`, `ping` and `tools/list` are free so an agent can discover the tool
@@ -175,6 +317,12 @@ on the free tier.
 |---|---|
 | free | 10 / min |
 | paid (request carries a payment header) | 60 / min |
+| paid, `/v1/batch` specifically | 20 / min |
+
+`/v1/batch` gets its own, lower paid bucket: a single call can fan out to
+several D1 queries (up to 14, measured worst case at 200 items), so 20/min
+caps per-caller D1 query fan-out at ~280/min rather than reusing `/v1/check`'s
+60/min. Unpaid attempts at any path still share the one free bucket above.
 
 Keyed on a salted hash of the client IP. `/v1/health` and the discovery document
 are **never** limited — they are how a caller checks whether the service is
@@ -260,7 +408,8 @@ to reintroduce and its cost is invisible until the budget is gone.
 
 ```bash
 npm install
-npm test                       # 71 tests, 17 of them executing real SQL
+npm test                       # 142 tests; batch.test.ts, sql.test.ts, trial.test.ts
+                                # and mcp-batch.test.ts run against real SQL
 npm run typecheck
 
 npm run migrate:local

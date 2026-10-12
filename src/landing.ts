@@ -22,6 +22,7 @@ function esc(s: string): string {
 export function landingPage(env: Env, origin: string): string {
   const mcp = `${origin}/mcp`;
   const check = `${origin}/v1/check`;
+  const batch = `${origin}/v1/batch`;
 
   return `<!doctype html>
 <html lang="en">
@@ -101,12 +102,50 @@ reinstated, says so instead of just reporting "no match."</p>
 <tr><th>Endpoint</th><th>Price</th><th>Notes</th></tr>
 <tr><td><code>/v1/check</code></td><td>${esc(env.PRICE_CHECK)}</td><td>verdict, confidence, basis, reason per match</td></tr>
 <tr><td><code>/v1/report</code></td><td>${esc(env.PRICE_REPORT)}</td><td>every match with full source fields</td></tr>
+<tr><td><code>/v1/batch</code></td><td>$0.30 / $1.00 / $3.00</td><td>2-200 items in one call, tiered by count</td></tr>
 <tr><td><code>/v1/health</code>, <code>/.well-known/x402</code></td><td>free</td><td>row counts, load dates, payment terms</td></tr>
 <tr><td>MCP <code>exclusion_check</code></td><td>${esc(env.PRICE_CHECK)}</td><td>per call</td></tr>
+<tr><td>MCP <code>exclusion_batch_check</code></td><td>tiered</td><td>same tiers as <code>/v1/batch</code></td></tr>
 <tr><td>MCP <code>exclusion_sources</code></td><td>free</td><td>&nbsp;</td></tr>
 </table>
 <p>Paid in USDC over x402 on Base mainnet. See <a href="/v1/health">/v1/health</a> for current
 row counts and load freshness.</p>
+</section>
+
+<section>
+<h2>Batch screening</h2>
+<p>Screen 2-200 people or businesses in <strong>one</strong> paid call — a clinic's 80-person
+staff roster is one call, not 80. Each item takes the same fields as <code>/v1/check</code>,
+plus an optional <code>ref</code> that comes back unchanged so you can join results to your own
+records. An invalid item is returned as an error in its place, not a failed batch; only a batch
+where every item is invalid is refused, and only then with no charge.</p>
+<pre>curl -X POST "${batch}" -H 'content-type: application/json' -d '{
+  "items": [
+    {"ref": "staff-1", "name": "Smith, John", "state": "TX"},
+    {"ref": "staff-2", "npi": "1477537496"}
+  ]
+}'</pre>
+<table>
+<tr><th>Items</th><th>Price</th></tr>
+<tr><td>2-10</td><td>$0.30</td></tr>
+<tr><td>11-50</td><td>$1.00</td></tr>
+<tr><td>51-200</td><td>$3.00</td></tr>
+</table>
+<p>Charged once per call, by item count, resolved from the real request at the time of payment
+— the <code>payment-required</code> header on an unpaid call always carries the exact amount for
+what you sent, not a rounded-up estimate.</p>
+</section>
+
+<section>
+<h2>v2 envelope</h2>
+<p>Add <code>?v=2</code> to <code>/v1/check</code>, <code>/v1/report</code>, or <code>/v1/batch</code>
+for the CF Soft envelope: the same top-level shape (<code>service</code>, <code>verdict</code>,
+<code>confidence</code>, <code>basis</code>, <code>counts</code>, <code>records</code>,
+<code>sources</code>, <code>limits</code>, <code>as_of</code>) every CF Soft booth returns, so
+integrating one booth is most of the way to integrating all of them. Without <code>?v=2</code>,
+every response stays exactly what it always was. Full shape in
+<a href="https://github.com/cfgenius145-sketch/cf-exclusion-check/blob/main/docs/ENVELOPE.md">docs/ENVELOPE.md</a>.</p>
+<pre>curl "${check}?name=Smith,%20John&amp;state=TX&amp;v=2"</pre>
 </section>
 
 <section>
@@ -149,8 +188,9 @@ URL, no bridge process):</p>
     }
   }
 }</pre>
-<p><code>initialize</code> and <code>tools/list</code> are free, so an agent can see the tool
-and its price before paying. Try it: <code>exclusion_sources</code> is a free tool.</p>
+<p><code>initialize</code> and <code>tools/list</code> are free, so an agent can see both paid tools
+— <code>exclusion_check</code> and <code>exclusion_batch_check</code> — and their price before
+paying. Try it: <code>exclusion_sources</code> is a free tool.</p>
 </section>
 
 <section>
@@ -159,7 +199,9 @@ and its price before paying. Try it: <code>exclusion_sources</code> is a free to
 <pre>git clone https://github.com/cfgenius145-sketch/cf-exclusion-check
 cd cf-exclusion-check &amp;&amp; npm install
 node scripts/x402-client.mjs                    # pays ${esc(env.PRICE_CHECK)} for /v1/check
-node scripts/x402-client.mjs /v1/report "Name"  # pays ${esc(env.PRICE_REPORT)}</pre>
+node scripts/x402-client.mjs /v1/report "Name"  # pays ${esc(env.PRICE_REPORT)}
+BODY_JSON='{"items":[{"name":"Smith, John"},{"npi":"1477537496"}]}' \
+  node scripts/x402-client.mjs /v1/batch        # pays the tiered price for /v1/batch</pre>
 </section>
 
 <section>

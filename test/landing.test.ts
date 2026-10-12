@@ -44,4 +44,17 @@ describe("landingPage", () => {
   it("does not hardcode a row count that would go stale", () => {
     expect(html).not.toMatch(/247,?583/);
   });
+
+  it("documents batch screening with its tier table and both MCP tools", () => {
+    expect(html).toContain("/v1/batch");
+    expect(html).toContain("exclusion_batch_check");
+    expect(html).toContain("$0.30");
+    expect(html).toContain("$1.00");
+    expect(html).toContain("$3.00");
+  });
+
+  it("documents the v2 envelope opt-in", () => {
+    expect(html).toContain("?v=2");
+    expect(html).toContain("ENVELOPE.md");
+  });
 });

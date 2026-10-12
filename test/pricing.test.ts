@@ -74,4 +74,13 @@ describe("price to atomic USDC", () => {
     // Free endpoints must stay free after a price change.
     expect(eps.filter((e) => e.free).map((e) => e.price)).toEqual(["$0.00", "$0.00"]);
   });
+
+  it("/v1/batch is not charged a pre-computed atomic amount", () => {
+    // A tiered price cannot be reduced to one atomic amount ahead of the
+    // actual request, so this must be null with a note rather than whatever
+    // garbage falls out of feeding a tier-range string through atomicAmount().
+    const batch = accepts(envFor("$0.05", "$0.50")).find((e: any) => e.resource.endsWith("/v1/batch")) as any;
+    expect(batch.amount).toBeNull();
+    expect(batch.variablePrice).toBe(true);
+  });
 });

@@ -9,6 +9,10 @@ export interface Env {
   PRICE_CHECK: string;        // "$0.05"
   PRICE_REPORT: string;       // "$0.50"
   SERVICE_NAME: string;
+  // State Medicaid exclusion lists (v2 only, see state_import.ts /
+  // state_match.ts). Served by CFAI as a plain-body gzip, no Content-Encoding.
+  STATE_MANIFEST_URL: string;
+  STATE_RECORDS_URL: string;
 
   // secrets (wrangler secret put)
   PAY_TO?: string;            // receiving address; unset => payment disabled

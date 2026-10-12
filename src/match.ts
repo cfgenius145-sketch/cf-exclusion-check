@@ -58,6 +58,13 @@ export interface ExclusionRow {
   excl_type: string | null;
   excl_date: string | null;
   reinstate_date: string | null;
+  /** State-list only (see state_match.ts's toExclusionRow()): an inferred,
+   * unconfirmed possible reinstatement signal. Never used by
+   * isCurrentlyExcluded() or classify() -- it exists purely for the caller's
+   * wording layer, so a state match is never silently auto-cleared on
+   * evidence no state actually publishes. Absent/undefined for every
+   * federal (LEIE/SAM) row. */
+  possible_reinstatement?: { first_missing_at: string; times_missing: number } | null;
   waiver_date: string | null;
   waiver_state: string | null;
 }
@@ -328,6 +335,16 @@ export function overallConfidence(matches: MatchedRow[]): Confidence {
   let best: Confidence = "none";
   for (const m of matches) if (RANK[m.confidence] > RANK[best]) best = m.confidence;
   return best;
+}
+
+/**
+ * Basis of the strongest match, or null when there is none.
+ *
+ * `classify` sorts its output by confidence rank descending, so the first
+ * element is the same record `overallConfidence` reports on.
+ */
+export function overallBasis(matches: MatchedRow[]): MatchBasis | null {
+  return matches[0]?.basis ?? null;
 }
 
 /**

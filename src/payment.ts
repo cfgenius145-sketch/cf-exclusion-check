@@ -28,6 +28,8 @@ import {
 import type { MiddlewareHandler } from "hono";
 import { cdpAuthHeaders } from "./cdp";
 import type { Env } from "./env";
+import { parseBatchItems, tierFor } from "./batch";
+import { PAID_TOOL_BATCH } from "./mcp";
 
 let cached: { key: string; handler: MiddlewareHandler } | null = null;
 
@@ -56,6 +58,71 @@ function unpaidBody(env: Env, path: string, price: string) {
         "Send the x402 payment header to access this endpoint. The discovery " +
         "document lists the exact payment requirements.",
     },
+  };
+}
+
+/** Unpaid-request body for /v1/batch: no single price, so the tier table is
+ * spelled out instead of the `price` field the other routes carry. */
+function unpaidBatchBody(env: Env) {
+  return {
+    contentType: "application/json",
+    body: {
+      error: "payment required",
+      endpoint: "/v1/batch",
+      pricing: "tiered by item count, charged once per call",
+      tiers: { "2-10": "$0.30", "11-50": "$1.00", "51-200": "$3.00" },
+      network: env.NETWORK,
+      asset: "USDC",
+      pay_with: "x402",
+      discovery: "/.well-known/x402",
+      free_endpoints: ["/v1/health", "/.well-known/x402"],
+      note:
+        "The exact price for your item count is in this response's " +
+        "payment-required header, computed from the same tier table.",
+    },
+  };
+}
+
+/**
+ * Tiered price for /v1/batch, resolved from the real request body.
+ *
+ * `@x402/core` 2.25.0 supports a price as a function of request context
+ * (`Price | DynamicPrice`, `DynamicPrice = (context) => Price | Promise<Price>`),
+ * verified against the installed package's compiled JS: the Hono adapter's
+ * `getBody()` is `async () => this.c.req.json()`, which Hono caches — so this
+ * reads the same parsed body index.ts's pre-paywall gate already validated,
+ * with no extra request read. Falls back to the top tier only if the shape is
+ * unparseable here, which should be unreachable: the pre-paywall gate in
+ * index.ts already rejects a malformed batch before this function is ever
+ * asked for a price.
+ */
+function batchPrice(): (context: { adapter?: { getBody?(): unknown } }) => Promise<string> {
+  return async (context) => {
+    const body = await context.adapter?.getBody?.();
+    const items = parseBatchItems(body);
+    return (items && tierFor(items.length)?.price) || "$3.00";
+  };
+}
+
+/**
+ * Price for POST /mcp, tool-aware.
+ *
+ * One route serves two paid tools at different prices (exclusion_check is
+ * fixed, exclusion_batch_check is tiered), so the route's price reads the
+ * JSON-RPC body to see which tool is being called — the same DynamicPrice
+ * mechanism as batchPrice(), applied to a JSON-RPC body shape instead of a
+ * plain HTTP one.
+ */
+function mcpPrice(env: Env): (context: { adapter?: { getBody?(): unknown } }) => Promise<string> {
+  return async (context) => {
+    const body = (await context.adapter?.getBody?.()) as
+      { params?: { name?: string; arguments?: unknown } } | undefined;
+    const params = body?.params;
+    if (params?.name === PAID_TOOL_BATCH) {
+      const items = parseBatchItems(params.arguments);
+      return (items && tierFor(items.length)?.price) || "$3.00";
+    }
+    return env.PRICE_CHECK;
   };
 }
 
@@ -117,6 +184,12 @@ function routesFor(env: Env, payTo: string) {
     bodyType: "json", input: QUERY_INPUT,
     output: { example: { verdict: "excluded", matches: [{ record: {} }] } },
   });
+  const batchDiscoveryPost = declareDiscoveryExtension({
+    bodyType: "json",
+    input: { items: "array" },
+    output: { example: { billed_items: 2, tier: "small", price: "$0.30",
+      results: [{ verdict: "excluded" }] } },
+  });
 
   const check = {
     accepts: { ...common, price: env.PRICE_CHECK },
@@ -126,9 +199,14 @@ function routesFor(env: Env, payTo: string) {
       //   'paymentPayload' is invalid: must match one of [x402V2Pay...
       // and reverting this exact string restored a settling payment, so the
       // metadata size is load-bearing. Name both sources and every identifier,
-      // then stop.
-      "Screen a person or business against the HHS-OIG LEIE and SAM.gov " +
-      "exclusion lists. Match by name, NPI, UEI or CAGE.",
+      // then stop. (2026-09-18: added state coverage in ~25 extra characters,
+      // no new tags — well inside the margin between this string's prior
+      // length and the 631-char one that broke verify, but still untested
+      // against a real settlement since CDP's /validate was blocked at the
+      // Cloudflare edge for this whole session; re-verify with a real paid
+      // call before trusting this is safe at scale.)
+      "Screen a person or business against the HHS-OIG LEIE, SAM.gov, and " +
+      "16 state Medicaid lists. Match by name, NPI, UEI, CAGE or state.",
     mimeType: "application/json",
     serviceName: env.SERVICE_NAME,
     tags: ["healthcare", "compliance", "screening", "exclusions", "sam-gov"],
@@ -138,12 +216,24 @@ function routesFor(env: Env, payTo: string) {
   const report = {
     accepts: { ...common, price: env.PRICE_REPORT },
     description:
-      "Full exclusion report from the HHS-OIG LEIE and SAM.gov: every match " +
-      "with agency, dates, NPI, UEI and CAGE.",
+      "Full exclusion report from the HHS-OIG LEIE, SAM.gov, and 16 state " +
+      "Medicaid lists: every match with agency, dates, NPI, UEI and CAGE.",
     mimeType: "application/json",
     serviceName: env.SERVICE_NAME,
     tags: ["healthcare", "compliance", "screening", "exclusions", "sam-gov"],
     unpaidResponseBody: () => unpaidBody(env, "/v1/report", env.PRICE_REPORT),
+  };
+
+  const batch = {
+    accepts: { ...common, price: batchPrice() },
+    description:
+      "Screen 2-200 people/businesses in one call against the HHS-OIG LEIE " +
+      "and SAM.gov exclusion lists. Tiered: $0.30 (2-10), $1.00 (11-50), " +
+      "$3.00 (51-200).",
+    mimeType: "application/json",
+    serviceName: env.SERVICE_NAME,
+    tags: ["healthcare", "compliance", "screening", "exclusions", "sam-gov"],
+    unpaidResponseBody: () => unpaidBatchBody(env),
   };
 
   // The MCP endpoint must be registered here too, priced like /v1/check.
@@ -155,11 +245,14 @@ function routesFor(env: Env, payTo: string) {
   // only delegates to this middleware for `tools/call` on the paid tool, so
   // registering the path here does not put initialize or tools/list behind the
   // paywall.
+  // Tool-aware price: exclusion_check is fixed, exclusion_batch_check is
+  // tiered by item count. See mcpPrice().
   const mcp = {
     ...check,
+    accepts: { ...common, price: mcpPrice(env) },
     description:
-      `MCP tool call: ${check.description} Charged per tools/call of the paid ` +
-      `tool; initialize and tools/list are free.`,
+      "MCP tool call: exclusion_check (fixed) or exclusion_batch_check " +
+      "(2-200 items, tiered). See the free tools/list for exact prices.",
     unpaidResponseBody: () => unpaidBody(env, "/mcp", env.PRICE_CHECK),
   };
 
@@ -170,6 +263,7 @@ function routesFor(env: Env, payTo: string) {
     "GET /v1/check": { ...check, extensions: checkDiscoveryGet },
     "POST /v1/report": { ...report, extensions: reportDiscoveryPost },
     "GET /v1/report": { ...report, extensions: reportDiscoveryGet },
+    "POST /v1/batch": { ...batch, extensions: batchDiscoveryPost },
     "POST /mcp": mcp,
   };
 }

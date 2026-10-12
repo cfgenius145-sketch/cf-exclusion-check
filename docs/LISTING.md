@@ -19,7 +19,8 @@ SAM.gov — for $0.05, and get told why it matched.
 Pay-per-call screening against the HHS-OIG LEIE and SAM.gov exclusions —
 247,583 records including reinstatement history. Match by name, NPI, UEI or
 CAGE. Every result states its confidence and the exact basis it matched on.
-$0.05 per check, $0.50 for a full report. MCP tool included.
+$0.05 per check, $0.50 for a full report, or screen a whole roster (2-200) in
+one call from $0.30. MCP tool included.
 
 ## Long description
 
@@ -56,6 +57,13 @@ Results also carry two counts, not one: matching rows *and* distinct subjects.
 The source list records some subjects several times, so a single count would
 read as several separate exclusions when it is one person recorded three times.
 
+An agent checking a clinic's 80-person staff roster does not need 80 calls.
+**`/v1/batch`** screens 2-200 people or businesses in one call, one result per
+item in the same order and vocabulary as `/v1/check`, priced once per call by
+item count ($0.30 for 2-10, $1.00 for 11-50, $3.00 for 51-200). An invalid item
+is reported in place, not a failure; only an all-invalid batch is refused
+before any charge.
+
 Free endpoints let you check the service and its data freshness before you spend
 anything: `/v1/health` reports row counts, load dates and whether the loaded
 generation has fallen behind the upstream file.
@@ -66,17 +74,21 @@ generation has fallen behind the upstream file.
 |---|---|
 | `/v1/check` | $0.05 |
 | `/v1/report` — every match, full source fields | $0.50 |
+| `/v1/batch` — 2-200 items in one call | $0.30 / $1.00 / $3.00, tiered by count |
 | `/v1/health`, `/.well-known/x402` | free |
 | MCP `exclusion_check` | $0.05 per call |
+| MCP `exclusion_batch_check` | tiered, same as `/v1/batch` |
 | MCP `exclusion_sources` | free |
 
 Paid in USDC over x402 on **Base mainnet**.
 
 ### For agents
 
-An MCP endpoint at `/mcp` exposes `exclusion_check` as a tool. `initialize` and
-`tools/list` are free, so an agent can discover the tool and its price before
-committing to a paid call.
+An MCP endpoint at `/mcp` exposes `exclusion_check` and `exclusion_batch_check`
+as tools. `initialize` and `tools/list` are free, so an agent can discover both
+tools and their price before committing to a paid call — a single-name check
+one call, or a whole roster in one `exclusion_batch_check` call instead of one
+call per name.
 
 ## Tags
 
@@ -141,6 +153,33 @@ Response shape:
   ],
   "coverage": { "complete": true, "note": "All sources fully loaded." },
   "disclaimer": "Screening against the HHS-OIG LEIE and SAM.gov exclusion data generations identified under `sources`. …"
+}
+```
+
+### Batch example
+
+Request:
+
+```bash
+curl -X POST "$BASE/v1/batch" -H 'content-type: application/json' -d '{
+  "items": [
+    {"ref": "staff-1", "name": "Smith, John", "state": "TX"},
+    {"ref": "staff-2", "npi": "1477537496"}
+  ]
+}'
+```
+
+Response shape (abridged):
+
+```json
+{
+  "billed_items": 2,
+  "tier": "small",
+  "price": "$0.30",
+  "results": [
+    { "ref": "staff-1", "verdict": "no_match", "confidence": "none", "match_count": 0 },
+    { "ref": "staff-2", "verdict": "excluded", "confidence": "strong", "basis": "npi", "match_count": 1 }
+  ]
 }
 ```
 

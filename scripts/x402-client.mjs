@@ -21,10 +21,13 @@
  * Usage:
  *   node scripts/x402-client.mjs                      # /v1/check
  *   node scripts/x402-client.mjs /v1/report "Name"    # any paid endpoint
+ *   BODY_JSON='{"items":[...]}' node scripts/x402-client.mjs /v1/batch
+ *                                                      # POST with a JSON body
+ *     instead of ?name=... — for /v1/batch or any other JSON-body route.
  */
 import { existsSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { createPublicClient, http, formatUnits } from "viem";
+import { createPublicClient, fallback, http, formatUnits } from "viem";
 import { base, baseSepolia } from "viem/chains";
 import { wrapFetchWithPaymentFromConfig, decodePaymentResponseHeader } from "@x402/fetch";
 import { ExactEvmScheme } from "@x402/evm/exact/client";
@@ -86,7 +89,16 @@ const payer = JSON.parse(readFileSync(KEYFILE, "utf8"));
 const account = privateKeyToAccount(payer.privateKey);
 
 // --- balances --------------------------------------------------------------
-const pub = createPublicClient({ chain: NET.chain, transport: http() });
+// Public Base RPC endpoints flake: the 2026-09-21 keepalive died on a single
+// "RPC Request failed" in the pre-payment balanceOf read. Every read now retries
+// (viem http retryCount) and falls back across endpoints. Override with
+// BASE_RPC_URLS="url1,url2". Testnet keeps the chain default.
+const RPC_URLS = (process.env.BASE_RPC_URLS ?? "https://mainnet.base.org,https://base-rpc.publicnode.com,https://base.llamarpc.com")
+  .split(",").map((u) => u.trim()).filter(Boolean);
+const transport = NET.real
+  ? fallback(RPC_URLS.map((u) => http(u, { retryCount: 3, retryDelay: 1000, timeout: 15_000 })))
+  : http();
+const pub = createPublicClient({ chain: NET.chain, transport });
 const balanceOf = [{
   name: "balanceOf", type: "function", stateMutability: "view",
   inputs: [{ name: "a", type: "address" }], outputs: [{ type: "uint256" }],
@@ -102,8 +114,13 @@ console.log(`  target        : ${BASE}${PATH}`);
 console.log("");
 
 // --- step 1: unpaid ---------------------------------------------------------
-const url = `${BASE}${PATH}?name=${encodeURIComponent(NAME)}`;
-const unpaid = await fetch(url);
+const BODY_JSON = process.env.BODY_JSON;
+const url = BODY_JSON ? `${BASE}${PATH}` : `${BASE}${PATH}?name=${encodeURIComponent(NAME)}`;
+const reqInit = BODY_JSON
+  ? { method: "POST", headers: { "content-type": "application/json" }, body: BODY_JSON }
+  : undefined;
+
+const unpaid = await fetch(url, reqInit);
 console.log(`  [1] unpaid request        -> HTTP ${unpaid.status}`);
 const challenge = unpaid.headers.get("payment-required");
 if (challenge) {
@@ -139,7 +156,7 @@ const paidFetch = wrapFetchWithPaymentFromConfig(fetch, {
 });
 
 console.log("  [2] paying request ...");
-const paid = await paidFetch(url);
+const paid = await paidFetch(url, reqInit);
 console.log(`      -> HTTP ${paid.status}`);
 
 const settle = paid.headers.get("payment-response");

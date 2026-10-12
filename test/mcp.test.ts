@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PAID_METHODS, PAID_TOOL, PROTOCOL_VERSION, handleMcp } from "../src/mcp";
+import { PAID_METHODS, PAID_TOOL, PAID_TOOL_BATCH, PROTOCOL_VERSION, handleMcp } from "../src/mcp";
 import type { Env } from "../src/env";
 
 /**
@@ -33,10 +33,10 @@ describe("mcp protocol", () => {
       });
   });
 
-  it("lists both tools with the paid one first", async () => {
+  it("lists both paid tools before the free one", async () => {
     const out = await handleMcp(env, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     const tools = (out?.payload as any).result.tools;
-    expect(tools.map((t: any) => t.name)).toEqual([PAID_TOOL, "exclusion_sources"]);
+    expect(tools.map((t: any) => t.name)).toEqual([PAID_TOOL, PAID_TOOL_BATCH, "exclusion_sources"]);
   });
 
   it("the paid tool advertises its price in its description", async () => {

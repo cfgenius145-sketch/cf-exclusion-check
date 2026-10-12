@@ -39,6 +39,16 @@
         "type": "ratelimit",
         "namespace_id": "1002",
         "simple": { "limit": 60, "period": 60 }
+      },
+      // Separate, lower bucket for /v1/batch: each call can fan out to up to
+      // 14 D1 queries (measured worst case at 200 items, all distinct
+      // identifiers), so 20/min caps per-caller D1 query fan-out at ~280/min
+      // rather than reusing /v1/check's 60/min.
+      {
+        "name": "RL_BATCH",
+        "type": "ratelimit",
+        "namespace_id": "1003",
+        "simple": { "limit": 20, "period": 60 }
       }
     ]
   },
@@ -63,8 +73,15 @@
   // returns all 15,608,468 bytes with no accept-ranges), so a chunked loader
   // cannot slice the file, and 10ms CPU per invocation cannot parse it whole.
   // The bulk generation is built by scripts/build-seed.mjs. See src/loader.ts.
+  // "* 7-11 * * *" — state-exclusions import ticks, added 2026-09-15. CFAI's
+  // export rebuilds at 07:15 UTC; this 5-hour, once-a-minute window (300
+  // ticks) gives wide margin over the ~186 ticks a full 66,908-record load
+  // needs at MAX_INSERTS_PER_TICK (state_import.ts) — unverified estimate,
+  // to be measured for real on the preview deploy before this ships past G2.
+  // A tick outside an in-progress load just checks the manifest sha256 and
+  // returns "unchanged" — cheap, one fetch, no D1 write.
   "triggers": {
-    "crons": ["0 6 15 * *", "0 7 * * *"]
+    "crons": ["0 6 15 * *", "0 7 * * *", "* 7-11 * * *"]
   },
 
   // LIVE ON BASE MAINNET. Payments here are real money.
@@ -88,6 +105,12 @@
     "LEIE_CSV_URL": "https://oig.hhs.gov/exclusions/downloadables/UPDATED.csv",
     "PRICE_CHECK": "$0.05",
     "PRICE_REPORT": "$0.50",
-    "SERVICE_NAME": "CF Exclusion Check"
+    "SERVICE_NAME": "CF Exclusion Check",
+    // State Medicaid exclusion lists (2026-09-15). CFAI's export, rebuilt
+    // daily at 07:15 UTC after its own rebuild_excl_index (06:55). Plain
+    // body, no Content-Encoding — see state_import.ts's readWindow comment
+    // on why that matters.
+    "STATE_MANIFEST_URL": "https://cfai.app/exports/state-exclusions/manifest.json",
+    "STATE_RECORDS_URL": "https://cfai.app/exports/state-exclusions/records.ndjson.gz"
   }
 }

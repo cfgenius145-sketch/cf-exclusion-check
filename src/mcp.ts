@@ -15,7 +15,12 @@
  * charging for discovery would make the tool undiscoverable in practice.
  */
 import type { Env } from "./env";
+import {
+  assembleResults, buildBatchQueries, MAX_BATCH_ITEMS, MIN_BATCH_ITEMS,
+  parseBatchItems, runBatchQueries, tierFor, validateBatchItems,
+} from "./batch";
 import { validateQuery, type Query } from "./match";
+import { buildExclusionEnvelope, buildLimits, toEnvelopeSources } from "./envelope-adapter";
 import { DISCLAIMER, coverageOf, screen, sourceInfo } from "./screen";
 
 export const PROTOCOL_VERSION = "2025-06-18";
@@ -25,6 +30,13 @@ export const PAID_METHODS = new Set(["tools/call"]);
 
 /** Tool name that costs money; the free tools are listed alongside it. */
 export const PAID_TOOL = "exclusion_check";
+
+/** Batch tool name; priced by tier via src/batch.ts's tierFor(). */
+export const PAID_TOOL_BATCH = "exclusion_batch_check";
+
+/** Every tool that requires payment — both entries here, not a single string,
+ * so index.ts's pre-payment gate recognises the batch tool too. */
+export const PAID_TOOLS = new Set([PAID_TOOL, PAID_TOOL_BATCH]);
 
 interface JsonRpcRequest {
   jsonrpc?: string;
@@ -81,12 +93,49 @@ function toolDefinitions(env: Env) {
       annotations: { readOnlyHint: true },
     },
     {
+      name: PAID_TOOL_BATCH,
+      title: "Batch-screen 2-200 exclusions in one call",
+      description:
+        `Screen ${MIN_BATCH_ITEMS}-${MAX_BATCH_ITEMS} people/businesses against ` +
+        `the same sources as ${PAID_TOOL} in one call. Tiered price by item ` +
+        `count: $0.30 (2-10), $1.00 (11-50), $3.00 (51-200), charged once via ` +
+        `x402. An invalid item is reported in place, not a failure; all-invalid ` +
+        `is refused before charging.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          items: {
+            type: "array",
+            minItems: MIN_BATCH_ITEMS,
+            maxItems: MAX_BATCH_ITEMS,
+            items: {
+              type: "object",
+              properties: {
+                ref: { type: "string", description: "Your own id for this item, round-tripped." },
+                name: { type: "string" },
+                npi: { type: "string" },
+                dob: { type: "string" },
+                state: { type: "string" },
+                uei: { type: "string" },
+                cage: { type: "string" },
+              },
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["items"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true },
+    },
+    {
       name: "exclusion_sources",
       title: "Data sources and freshness",
       description:
         "List the loaded exclusion sources (OIG LEIE and SAM.gov), their row " +
         "counts, load dates, load completeness and whether a bulk reseed is " +
-        "due. Free.",
+        "due. Free. Screening itself is paid: exclusion_check per name, or " +
+        `${PAID_TOOL_BATCH} for 2-200 at once ($0.30/$1.00/$3.00 by size).`,
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true },
     },
@@ -130,8 +179,9 @@ export async function handleMcp(
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: env.SERVICE_NAME, version: "1.0.0" },
           instructions:
-            `${PAID_TOOL} costs ${env.PRICE_CHECK} per call and is paid with ` +
-            `x402 on ${env.NETWORK}. An unpaid call returns a 402 whose ` +
+            `${PAID_TOOL} costs ${env.PRICE_CHECK} per call; ${PAID_TOOL_BATCH} ` +
+            `screens 2-200 at once for $0.30/$1.00/$3.00 by size. Both are paid ` +
+            `with x402 on ${env.NETWORK}. An unpaid call returns a 402 whose ` +
             `payment-required header carries the payment requirements. ` +
             `exclusion_sources is free.`,
         }),
@@ -159,6 +209,85 @@ export async function handleMcp(
         };
       }
 
+      if (toolName === PAID_TOOL_BATCH) {
+        // Item-count range is already enforced pre-payment in index.ts's /mcp
+        // gate; re-checked here too, same defensive-depth style as the HTTP
+        // handler, in case this tool is ever reached another way.
+        const items = parseBatchItems(args) ?? [];
+        if (items.length < MIN_BATCH_ITEMS || items.length > MAX_BATCH_ITEMS) {
+          return {
+            status: 200,
+            payload: ok(id, {
+              isError: true,
+              content: [{ type: "text",
+                text: `items must be an array of ${MIN_BATCH_ITEMS}-${MAX_BATCH_ITEMS} entries` }],
+            }),
+          };
+        }
+
+        const validated = validateBatchItems(items);
+        if (validated.every((v) => !v.ok)) {
+          return {
+            status: 200,
+            payload: ok(id, { isError: true,
+              content: [{ type: "text", text: "every item failed validation" }] }),
+          };
+        }
+
+        const tier = tierFor(items.length);
+        const queries = buildBatchQueries(validated.filter((v) => v.ok).map((v) => v.item));
+        const rows = await runBatchQueries(env.DB, queries);
+        const results = assembleResults(validated, rows);
+        const sources = await sourceInfo(env);
+        const coverage = coverageOf(sources);
+        const stateSupplied = validated.some((v) => Boolean(v.item.state));
+        // v2 envelope nested under its own key — see ENVELOPE.md §1.6 for
+        // why this isn't flattened into the same object as the v1 fields.
+        const envelope = {
+          service: "exclusion-check", version: "2",
+          billed_items: items.length,
+          tier: tier?.tier ?? null,
+          price: tier?.price ?? null,
+          sources: toEnvelopeSources(sources),
+          limits: buildLimits({
+            coverageComplete: coverage.complete, coverageNote: coverage.note,
+            stateSupplied, verdict: "no_match",
+          }),
+          as_of: sources.map((s) => s.loaded_at).filter(Boolean).sort()[0] ?? new Date().toISOString(),
+          results: results.map((r) => ({
+            ref: r.ref, query: r.query,
+            ...(r.error
+              ? { error: r.error }
+              : {
+                  verdict: r.verdict, confidence: r.confidence, basis: r.basis,
+                  counts: { records: r.match_count, subjects: r.subject_count },
+                  records: r.matches, truncated: r.truncated,
+                }),
+          })),
+        };
+        const structured = {
+          billed_items: items.length,
+          tier: tier?.tier ?? null,
+          price: tier?.price ?? null,
+          as_of: new Date().toISOString(),
+          results,
+          envelope,
+        };
+
+        return {
+          status: 200,
+          payload: ok(id, {
+            content: [{
+              type: "text",
+              text:
+                `${items.length} items screened, tier ${tier?.tier ?? "?"} ` +
+                `(${tier?.price ?? "?"})\n\n` + JSON.stringify(structured, null, 2),
+            }],
+            structuredContent: structured,
+          }),
+        };
+      }
+
       if (toolName !== PAID_TOOL) {
         return { status: 200, payload: err(id, -32602, `unknown tool: ${toolName}`) };
       }
@@ -182,12 +311,14 @@ export async function handleMcp(
         sourceInfo(env),
       ]);
 
+      const mcpQueryEcho = {
+        name: q.name ?? null, npi: q.npi ?? null,
+        dob: q.dob ?? null, state: q.state ?? null,
+        uei: q.uei ?? null, cage: q.cage ?? null,
+      };
+      const coverage = coverageOf(sources);
       const structured = {
-        query: {
-          name: q.name ?? null, npi: q.npi ?? null,
-          dob: q.dob ?? null, state: q.state ?? null,
-          uei: q.uei ?? null, cage: q.cage ?? null,
-        },
+        query: mcpQueryEcho,
         verdict: result.verdict,
         confidence: result.confidence,
         match_count: result.match_count,
@@ -195,9 +326,22 @@ export async function handleMcp(
         truncated: result.truncated,
         matches: result.matches,
         sources,
-        coverage: coverageOf(sources),
+        coverage,
         disclaimer: DISCLAIMER,
         checked_at: new Date().toISOString(),
+        // v2 envelope nested under its own key — see ENVELOPE.md §1.6.
+        envelope: buildExclusionEnvelope({
+          query: mcpQueryEcho,
+          verdict: result.verdict,
+          confidence: result.confidence,
+          matchCount: result.match_count,
+          subjectCount: result.subject_count,
+          matches: result.matches,
+          sources,
+          coverageComplete: coverage.complete,
+          coverageNote: coverage.note,
+          stateSupplied: Boolean(q.state),
+        }),
       };
 
       return {

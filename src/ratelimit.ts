@@ -35,6 +35,15 @@ interface RateLimiter {
 interface RateLimitEnv {
   RL_FREE?: RateLimiter;
   RL_PAID?: RateLimiter;
+  /** Separate, lower paid bucket for /v1/batch — see checkRateLimit's `opts`. */
+  RL_BATCH?: RateLimiter;
+}
+
+/** Overrides the default paid bucket/limit. Omitted everywhere except
+ * /v1/batch, so /v1/check, /v1/report and /mcp are unaffected. */
+export interface RateLimitOverride {
+  paidLimiterKey: "RL_PAID" | "RL_BATCH";
+  paidLimit: number;
 }
 
 async function keyFor(env: Env, ip: string): Promise<string> {
@@ -57,20 +66,22 @@ async function keyFor(env: Env, ip: string): Promise<string> {
  * would make the service untestable while adding no protection in production.
  */
 export async function checkRateLimit(
-  env: Env, ip: string | null, hasPaymentHeader: boolean,
+  env: Env, ip: string | null, hasPaymentHeader: boolean, override?: RateLimitOverride,
 ): Promise<RateLimitDecision> {
   const e = env as unknown as RateLimitEnv;
   const paid = hasPaymentHeader;
   const bucket = paid ? "paid" : "free";
-  const limit = paid ? 60 : 10;
+  const limit = paid ? (override?.paidLimit ?? 60) : 10;
 
-  if (!e.RL_FREE && !e.RL_PAID) return { allowed: true, bucket, limit };
+  if (!e.RL_FREE && !e.RL_PAID && !e.RL_BATCH) return { allowed: true, bucket, limit };
 
   // Anonymous callers with no IP share one key rather than bypassing limits.
   const key = await keyFor(env, ip ?? "no-ip");
 
-  // Exactly one bucket is charged, so the two ceilings stay independent.
-  const limiter = paid ? e.RL_PAID : e.RL_FREE;
+  // Exactly one bucket is charged, so the ceilings stay independent — /v1/batch
+  // gets its own (lower) paid bucket via `override`, everything else keeps the
+  // original RL_PAID/RL_FREE pair untouched.
+  const limiter = paid ? e[override?.paidLimiterKey ?? "RL_PAID"] : e.RL_FREE;
   const result = limiter ? await limiter.limit({ key }) : { success: true };
   return { allowed: result.success, bucket, limit };
 }

@@ -18,6 +18,12 @@ export interface DiscoveryEndpoint {
   price: string;
   description: string;
   free: boolean;
+  /** True when `price` is a range/tier summary, not a single amount — the
+   * real x402 v2/Bazaar spec has no field for a request-size-dependent price,
+   * so `accepts[]` cannot pre-compute one for this endpoint (see below). The
+   * real price is in the live `payment-required` header for the actual
+   * request, computed the same way (see payment.ts's batchPrice()). */
+  variablePrice?: boolean;
 }
 
 export function endpoints(env: Env): DiscoveryEndpoint[] {
@@ -27,21 +33,33 @@ export function endpoints(env: Env): DiscoveryEndpoint[] {
       price: env.PRICE_CHECK,
       description:
         "Screen one name or identifier against the HHS-OIG List of Excluded " +
-        "Individuals and Entities (LEIE) and the SAM.gov exclusions list. " +
-        "Accepts name, NPI, UEI, CAGE, date of birth and state. Returns a " +
-        "verdict, a confidence level, the basis of each match, and the reason " +
-        "it matched.",
+        "Individuals and Entities (LEIE), the SAM.gov exclusions list, and " +
+        "Medicaid exclusion lists from 16 states (AZ, CA, KS, MD, MI, MO, MT, " +
+        "NC, ND, NJ, NY, OH, PA, SC, TX, WA). Does not cover the other 34 " +
+        "states or licensure board actions. Accepts name, NPI, UEI, CAGE, " +
+        "date of birth and state. Returns a verdict, a confidence level, the " +
+        "basis of each match, and the reason it matched.",
       free: false,
     },
     {
       path: "/v1/report", method: "POST",
       price: env.PRICE_REPORT,
       description:
-        "Full screening report: every matching record with complete source " +
-        "fields, exclusion, reinstatement and termination dates, excluding " +
-        "agency, classification, and load provenance for the data it was " +
-        "screened against.",
+        "Full screening report: every matching federal AND state record with " +
+        "complete source fields, exclusion, reinstatement and termination " +
+        "dates, excluding agency, classification, and load provenance for " +
+        "the data it was screened against.",
       free: false,
+    },
+    {
+      path: "/v1/batch", method: "POST",
+      price: "$0.30-$3.00 (tiered by item count: 2-10 $0.30, 11-50 $1.00, 51-200 $3.00)",
+      description:
+        "Screen 2-200 people/businesses in one call, same sources and match " +
+        "logic as /v1/check. One result per item, in input order. Charged " +
+        "once per call at the tier for the item count.",
+      free: false,
+      variablePrice: true,
     },
     {
       path: "/v1/health", method: "GET", price: "$0.00",
@@ -75,6 +93,20 @@ function atomicAmount(price: string, decimals: number): string {
   return BigInt(Math.round(dollars * 10 ** decimals)).toString();
 }
 
+/** Shared between the discovery document and the v2 envelope's `limits[]>`
+ * (see envelope-adapter.ts) so the two never drift apart. */
+export const EXCLUSION_LIMITATIONS: readonly string[] = [
+  "Screens the HHS-OIG LEIE and SAM.gov exclusions federally, plus Medicaid " +
+  "exclusion lists from 16 states: AZ, CA, KS, MD, MI, MO, MT, NC, ND, NJ, " +
+  "NY, OH, PA, SC, TX, WA. Does not screen the other 34 states or " +
+  "licensure board actions.",
+  "A match is a name match, not an identity determination. Confirm against " +
+  "the official record at https://exclusions.oig.hhs.gov (LEIE) or " +
+  "https://sam.gov/search (SAM) before acting.",
+  "Results reflect the loaded data generation reported by /v1/health, not " +
+  "a live query against OIG.",
+];
+
 export function discoveryDocument(env: Env, origin: string): unknown {
   const network = env.NETWORK;
   const tok = asset(network);
@@ -92,7 +124,12 @@ export function discoveryDocument(env: Env, origin: string): unknown {
     .map((e) => ({
       scheme: "exact",
       network,
-      amount: tok ? atomicAmount(e.price, tok.decimals) : null,
+      // A variable-price endpoint (/v1/batch) has no single atomic amount to
+      // pre-compute here: the x402 v2/Bazaar discovery shape has no field for
+      // a request-size-dependent price. `null` plus the note is honest about
+      // that, rather than feeding a tier-range string through atomicAmount()
+      // and publishing whatever garbage number falls out.
+      amount: e.variablePrice ? null : (tok ? atomicAmount(e.price, tok.decimals) : null),
       asset: tok?.address ?? null,
       payTo,
       maxTimeoutSeconds: 60,
@@ -100,6 +137,9 @@ export function discoveryDocument(env: Env, origin: string): unknown {
       resource: `${origin}${e.path}`,
       description: e.description,
       mimeType: "application/json",
+      ...(e.variablePrice
+        ? { variablePrice: true, note: "Tiered by item count; see the endpoint's own price field and its live payment-required header for the exact amount." }
+        : {}),
     }));
 
   return {
@@ -108,25 +148,17 @@ export function discoveryDocument(env: Env, origin: string): unknown {
     name: env.SERVICE_NAME,
     description:
       "Pay-per-call screening against the HHS-OIG List of Excluded Individuals " +
-      "and Entities (LEIE) and the SAM.gov exclusions list. Every result states " +
-      "why it matched.",
+      "and Entities (LEIE), the SAM.gov exclusions list, and Medicaid exclusion " +
+      "lists from 16 states. Every result states why it matched.",
     // Declared plainly rather than implied: the service is only as current as
     // its last load, and a name match is not an identity determination.
-    limitations: [
-      "Screens the HHS-OIG LEIE and SAM.gov exclusions. It does not screen " +
-      "state Medicaid exclusion lists or licensure board actions.",
-      "A match is a name match, not an identity determination. Confirm against " +
-      "the official record at https://exclusions.oig.hhs.gov (LEIE) or " +
-      "https://sam.gov/search (SAM) before acting.",
-      "Results reflect the loaded data generation reported by /v1/health, not " +
-      "a live query against OIG.",
-    ],
+    limitations: EXCLUSION_LIMITATIONS,
     accepts,
     endpoints: endpoints(env),
     facilitator: env.FACILITATOR_URL,
     network,
     payment_configured: Boolean(payTo),
-    mcp: { endpoint: `${origin}/mcp`, tools: ["exclusion_check"] },
+    mcp: { endpoint: `${origin}/mcp`, tools: ["exclusion_check", "exclusion_batch_check"] },
     terms: `${origin}/v1/health`,
   };
 }

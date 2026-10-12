@@ -110,7 +110,7 @@ export function verdictOf(matches: MatchedRow[]): Verdict {
 }
 
 /** Public record shape for /v1/check — no street address. */
-function briefRecord(row: ExclusionRow) {
+export function briefRecord(row: ExclusionRow) {
   return {
     source: row.source,
     last_name: row.last_name || null,
@@ -224,7 +224,7 @@ export interface ScreenResult {
  * exclusions" when it is one person recorded three times, so the subject count
  * is reported alongside it instead of leaving the caller to infer it.
  */
-function subjectCount(matches: MatchedRow[]): number {
+export function subjectCount(matches: MatchedRow[]): number {
   const keys = new Set<string>();
   for (const m of matches) {
     const r = m.row;
